@@ -1,0 +1,4 @@
+{
+  "files.exclude": {"out": true, "dist": true},
+  "search.exclude": {"out": true, "dist": true, "node_modules": true}
+}
