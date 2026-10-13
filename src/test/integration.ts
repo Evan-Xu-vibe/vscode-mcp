@@ -2,15 +2,30 @@ import { strict as assert } from 'node:assert';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { readFile, writeFile, mkdir, symlink } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { ExtensionApi } from '../extension';
+import { McpSidebar } from '../sidebar';
 
 export async function run(): Promise<void> {
   const extension = vscode.extensions.all.find(item => item.packageJSON.name === 'vscode-mcp');
   assert.ok(extension, 'Development extension is loaded');
   assert.equal(vscode.workspace.getConfiguration('vscodeMcp').inspect<boolean>('auth.enabled')?.defaultValue, true, 'Authentication setting is registered from the extension manifest');
   const api = await extension.activate() as ExtensionApi;
+  const sidebar = new McpSidebar(() => api.getConnectionInfo(), () => false, () => false);
+  try {
+    const sidebarCommands = sidebar.getChildren().map(item => item.command?.command);
+    for (const command of ['vscode-mcp.toggleAuth', 'vscode-mcp.setKey', 'vscode-mcp.setPort', 'vscode-mcp.toggleAutoStart', 'vscode-mcp.toggleWrites', 'vscode-mcp.toggleApproval', 'vscode-mcp.toggleTasks', 'vscode-mcp.configureTasks']) {
+      assert.ok(sidebarCommands.includes(command), `${command} is accessible from the sidebar`);
+    }
+    assert.equal(sidebarCommands.includes('vscode-mcp.openSettings'), false);
+  } finally { sidebar.dispose(); }
+  await vscode.commands.executeCommand('vscode-mcp.toggleAutoStart');
+  assert.equal(vscode.workspace.getConfiguration('vscodeMcp').get('autoStart'), true);
+  await vscode.commands.executeCommand('vscode-mcp.toggleAutoStart');
+  assert.equal(vscode.workspace.getConfiguration('vscodeMcp').get('autoStart'), false);
   const info = await api.start();
   const client = new Client({ name: 'vscode-integration', version: '1.0.0' });
   const root = vscode.workspace.workspaceFolders?.[0];
@@ -26,7 +41,7 @@ export async function run(): Promise<void> {
   };
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL(info.url), { requestInit: { headers: { Authorization: `Bearer ${info.token}` } } }));
-    assert.equal((await client.listTools()).tools.length, 10);
+    assert.equal((await client.listTools()).tools.length, 23);
     const workspace = await call('workspace_info');
     assert.equal((workspace.roots as unknown[]).length, 1);
     assert.equal(workspace.trusted, true);
@@ -75,10 +90,9 @@ export async function run(): Promise<void> {
     assert.equal(concurrent.filter(result => result.isError).length, 1);
     const current = await call('file_read', { path: 'fixture.txt' });
     await call('file_save', { path: 'fixture.txt', expectedHash: current.contentHash });
-    const configuration = vscode.workspace.getConfiguration('vscodeMcp');
-    await configuration.update('allowWrites', false, vscode.ConfigurationTarget.Workspace);
+    await vscode.commands.executeCommand('vscode-mcp.toggleWrites');
     await call('file_write', { path: 'fixture.txt', text: 'disabled', expectedHash: current.contentHash }, 'WRITE_DISABLED');
-    await configuration.update('allowWrites', true, vscode.ConfigurationTarget.Workspace);
+    await vscode.commands.executeCommand('vscode-mcp.toggleWrites');
 
     await call('file_write', { path: 'created.txt', text: 'created\n', create: true, save: true });
     assert.equal((await readFile(path.join(root.uri.fsPath, 'created.txt'), 'utf8')).replace(/\r\n/g, '\n'), 'created\n');
@@ -90,6 +104,131 @@ export async function run(): Promise<void> {
     diagnosticCollection.set(doc.uri, [new vscode.Diagnostic(new vscode.Range(0, 0, 0, 1), 'integration diagnostic', vscode.DiagnosticSeverity.Warning)]);
     const diagnostics = await call('diagnostics_get', { path: 'fixture.txt' });
     assert.ok((diagnostics.diagnostics as { message: string }[]).some(item => item.message === 'integration diagnostic'));
+
+    // Batch validation must finish before changing any document.
+    const beforeBatch = await call('file_read', { path: 'fixture.txt' });
+    const createdBefore = await call('file_read', { path: 'created.txt' });
+    const batchFiles = [{ path: 'fixture.txt', text: 'batch one\n', expectedHash: beforeBatch.contentHash }, { path: 'created.txt', text: 'batch two\n', expectedHash: createdBefore.contentHash }];
+    await call('files_write', { files: [batchFiles[0], { ...batchFiles[1], expectedHash: '0'.repeat(64) }] }, 'VERSION_CONFLICT');
+    assert.equal(doc.getText(), beforeBatch.text);
+    await call('files_write', { files: [batchFiles[0], { ...batchFiles[0], path: './fixture.txt' }] }, 'DUPLICATE_PATH');
+    await call('files_write', { files: [batchFiles[0], { path: 'escape/secret.txt', text: 'bad', expectedHash: beforeBatch.contentHash }] }, 'PATH_DENIED');
+    assert.equal(doc.getText(), beforeBatch.text);
+    const batch = await call('files_write', { files: batchFiles });
+    assert.equal((batch.files as unknown[]).length, 2);
+    assert.equal(doc.getText().replace(/\r\n/g, '\n'), 'batch one\n');
+
+    const reviewBase = await call('file_read', { path: 'fixture.txt' });
+    const preview = await call('files_preview', { files: [{ path: 'fixture.txt', text: 'accepted preview\n', expectedHash: reviewBase.contentHash }] });
+    assert.equal(preview.status, 'pending');
+    assert.equal(doc.getText(), reviewBase.text);
+    const previewUri = vscode.Uri.from({ scheme: 'vscode-mcp-review', path: `/${preview.proposalId}/0/after/fixture.txt` });
+    assert.equal((await vscode.workspace.openTextDocument(previewUri)).getText(), 'accepted preview\n');
+    await vscode.commands.executeCommand('vscode-mcp.reviewAccept', preview.proposalId);
+    assert.equal((await call('proposal_get', { proposalId: preview.proposalId })).status, 'accepted');
+    assert.equal(doc.getText().replace(/\r\n/g, '\n'), 'accepted preview\n');
+
+    const rejectedBase = await call('file_read', { path: 'fixture.txt' });
+    const rejected = await call('files_preview', { files: [{ path: 'fixture.txt', text: 'rejected', expectedHash: rejectedBase.contentHash }] });
+    await vscode.commands.executeCommand('vscode-mcp.reviewReject', rejected.proposalId);
+    assert.equal((await call('proposal_get', { proposalId: rejected.proposalId })).status, 'rejected');
+    assert.equal(doc.getText(), rejectedBase.text);
+    const stale = await call('files_preview', { files: [{ path: 'fixture.txt', text: 'stale', expectedHash: rejectedBase.contentHash }] });
+    await call('file_write', { path: 'fixture.txt', text: 'changed after preview', expectedHash: rejectedBase.contentHash });
+    await vscode.commands.executeCommand('vscode-mcp.reviewAccept', stale.proposalId);
+    const failedReview = await call('proposal_get', { proposalId: stale.proposalId });
+    assert.equal(failedReview.status, 'failed');
+    assert.equal(((failedReview.result as Record<string, unknown>).error as { code: string }).code, 'VERSION_CONFLICT');
+    assert.equal(doc.getText(), 'changed after preview');
+
+    await vscode.commands.executeCommand('vscode-mcp.toggleApproval');
+    const approvalBase = await call('file_read', { path: 'fixture.txt' });
+    const approval = await call('file_write', { path: 'fixture.txt', text: 'requires approval', expectedHash: approvalBase.contentHash });
+    assert.equal(approval.status, 'pending');
+    assert.equal(doc.getText(), 'changed after preview');
+    await vscode.commands.executeCommand('vscode-mcp.reviewReject', approval.proposalId);
+    const createPreview = await call('file_write', { path: 'review-created.txt', create: true, text: 'created by approval', save: true });
+    await assert.rejects(readFile(path.join(root.uri.fsPath, 'review-created.txt')));
+    await vscode.commands.executeCommand('vscode-mcp.reviewAccept', createPreview.proposalId);
+    assert.equal(await readFile(path.join(root.uri.fsPath, 'review-created.txt'), 'utf8'), 'created by approval');
+    const savePreview = await call('file_save', { path: 'fixture.txt', expectedHash: approvalBase.contentHash });
+    assert.equal(savePreview.status, 'pending');
+    assert.equal(doc.isDirty, true);
+    await vscode.commands.executeCommand('vscode-mcp.reviewReject', savePreview.proposalId);
+    const rangePreview = await call('file_apply_edits', { path: 'fixture.txt', expectedHash: approvalBase.contentHash, edits: [{ start: { line: 1, column: 1 }, end: { line: 1, column: 8 }, text: 'reviewed' }] });
+    assert.equal(rangePreview.status, 'pending');
+    assert.equal(doc.getText(), 'changed after preview');
+    await vscode.commands.executeCommand('vscode-mcp.reviewAccept', rangePreview.proposalId);
+    assert.equal(doc.getText(), 'reviewed after preview');
+    await vscode.commands.executeCommand('vscode-mcp.toggleApproval');
+
+    // Language providers can point outside the workspace; those results must be hidden.
+    const sampleRange = new vscode.Range(0, 0, 0, 3);
+    const selector = { scheme: 'file', language: 'plaintext' };
+    const providers = [
+      vscode.languages.registerDocumentSymbolProvider(selector, { provideDocumentSymbols: () => [new vscode.DocumentSymbol('fixtureSymbol', '', vscode.SymbolKind.Function, sampleRange, sampleRange)] }),
+      vscode.languages.registerDefinitionProvider(selector, { provideDefinition: () => [{ targetUri: doc.uri, targetRange: sampleRange }, { targetUri: vscode.Uri.file(path.join(outside, 'secret.txt')), targetRange: sampleRange }] }),
+      vscode.languages.registerReferenceProvider(selector, { provideReferences: () => [new vscode.Location(doc.uri, sampleRange), new vscode.Location(vscode.Uri.file(path.join(outside, 'secret.txt')), sampleRange)] })
+    ];
+    try {
+      assert.ok((await call('symbols_get', { path: 'fixture.txt' })).symbols);
+      for (const name of ['definitions_get', 'references_get']) {
+        const result = await call(name, { path: 'fixture.txt', line: 1, column: 1 });
+        assert.equal((result.locations as unknown[]).length, 1);
+        assert.equal((result.locations as { uri: string }[])[0].uri, doc.uri.toString());
+      }
+    } finally { providers.forEach(item => item.dispose()); }
+
+    const gitCommand = promisify(execFile);
+    const gitFixture = path.join(root.uri.fsPath, 'git-fixture.txt');
+    await writeFile(gitFixture, 'git original\n');
+    await gitCommand('git', ['init', root.uri.fsPath]);
+    await gitCommand('git', ['-C', root.uri.fsPath, 'add', 'git-fixture.txt']);
+    await gitCommand('git', ['-C', root.uri.fsPath, '-c', 'user.name=MCP Test', '-c', 'user.email=mcp@example.invalid', 'commit', '-m', 'test fixture']);
+    assert.match((await call('git_status')).text as string, /created.txt/);
+    assert.match((await call('git_log', { limit: 1 })).text as string, /test fixture/);
+    await writeFile(gitFixture, 'disk change\n');
+    assert.match((await call('git_diff', { path: 'git-fixture.txt' })).text as string, /disk change/);
+    await call('git_diff', { path: path.join(outside, 'secret.txt') }, 'PATH_DENIED');
+
+    const availableTasks = await call('tasks_list');
+    const taskList = availableTasks.tasks as { id: string; name: string }[];
+    const successTask = taskList.find(task => task.name === 'mcp-test-exit-0');
+    const failureTask = taskList.find(task => task.name === 'mcp-test-exit-7');
+    const stopTask = taskList.find(task => task.name === 'mcp-test-stop');
+    assert.ok(successTask); assert.ok(failureTask); assert.ok(stopTask);
+    await call('task_run', { taskId: successTask.id }, 'TASKS_DISABLED');
+    await vscode.commands.executeCommand('vscode-mcp.toggleTasks');
+    await call('task_run', { taskId: successTask.id }, 'TASK_NOT_ALLOWED');
+    await vscode.commands.executeCommand('vscode-mcp.configureTasks', [successTask.name, failureTask.name, stopTask.name]);
+    for (const [task, exitCode] of [[successTask, 0], [failureTask, 7]] as const) {
+      const run = await call('task_run', { taskId: task.id });
+      const deadline = Date.now() + 15_000;
+      let taskResult = await call('task_status', { runId: run.runId });
+      while (taskResult.status !== 'completed' && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        taskResult = await call('task_status', { runId: run.runId });
+      }
+      assert.equal(taskResult.status, 'completed'); assert.equal(taskResult.exitCode, exitCode);
+    }
+    const stopped = await call('task_run', { taskId: stopTask.id });
+    await call('task_run', { taskId: stopTask.id }, 'TASK_ALREADY_RUNNING');
+    await call('task_stop', { runId: stopped.runId });
+    const stopDeadline = Date.now() + 10_000;
+    let stoppedResult = await call('task_status', { runId: stopped.runId });
+    while (stoppedResult.status !== 'completed' && Date.now() < stopDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      stoppedResult = await call('task_status', { runId: stopped.runId });
+    }
+    assert.equal(stoppedResult.status, 'completed');
+    await vscode.commands.executeCommand('vscode-mcp.toggleTasks');
+    await vscode.commands.executeCommand('vscode-mcp.configureTasks', []);
+    assert.deepEqual(vscode.workspace.getConfiguration('vscodeMcp').get('tasks.allowedNames'), []);
+
+    await vscode.commands.executeCommand('vscode-mcp.copyCodex');
+    assert.match(await vscode.env.clipboard.readText(), /http_headers = \{ Authorization = "Bearer /);
+    await vscode.commands.executeCommand('vscode-mcp.copyOpenCode');
+    assert.equal(JSON.parse(await vscode.env.clipboard.readText()).mcp.vscode.headers.Authorization, `Bearer ${info.token}`);
     await client.close();
     await api.stop();
     await vscode.commands.executeCommand('vscode-mcp.toggleAuth');
@@ -101,12 +240,20 @@ export async function run(): Promise<void> {
     const noAuthClient = new Client({ name: 'no-auth-integration', version: '1.0.0' });
     try {
       await noAuthClient.connect(new StreamableHTTPClientTransport(new URL(noAuth.url)));
-      assert.equal((await noAuthClient.listTools()).tools.length, 10);
+      assert.equal((await noAuthClient.listTools()).tools.length, 23);
     } finally { await noAuthClient.close(); }
-    await api.stop();
+    await vscode.commands.executeCommand('vscode-mcp.copyCodex');
+    assert.equal((await vscode.env.clipboard.readText()).includes('http_headers'), false);
+    await vscode.commands.executeCommand('vscode-mcp.copyOpenCode');
+    assert.equal(JSON.parse(await vscode.env.clipboard.readText()).mcp.vscode.headers, undefined);
     await vscode.commands.executeCommand('vscode-mcp.toggleAuth');
-    assert.equal((await api.start()).authEnabled, true);
-    console.log('PASS: 10 tools, dirty buffers, ranges, conflicts, concurrent writes, save, search, diagnostics, path guards, permissions, create, limits and optional authentication.');
+    const fixedPort = Number(new URL(noAuth.url).port);
+    await vscode.commands.executeCommand('vscode-mcp.setPort', fixedPort);
+    const fixed = await api.restart();
+    assert.equal(fixed.authEnabled, true);
+    assert.equal(new URL(fixed.url).port, String(fixedPort));
+    assert.equal(new URL((await api.restart()).url).port, String(fixedPort));
+    console.log('PASS: 23 tools, dirty buffers, undo, conflicts, batch prevalidation, change review, Git queries, language providers, task exit codes, client configs, fixed port restart and optional authentication.');
   } finally {
     diagnosticCollection.dispose(); await client.close(); await api.stop();
   }

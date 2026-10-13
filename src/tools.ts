@@ -4,7 +4,11 @@ import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { assertWorkspacePath, hash, SerialQueue, ToolError } from './core';
+import { assertWorkspacePath, canonicalPath, hash, SerialQueue, ToolError } from './core';
+import { registerAdvanced } from './advanced';
+import { ChangeReviews, FileChange } from './review';
+import { TaskRuns } from './tasks';
+import type { CallRecord } from './history';
 
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TEXT = 64 * 1024;
@@ -16,10 +20,79 @@ const locationSchema = {
 const positionSchema = z.object({ line: z.number().int().min(1), column: z.number().int().min(1) });
 const expectedHashSchema = z.string().regex(/^[a-f0-9]{64}$/).describe('Full-document contentHash from file_read, even when reading a range.');
 
-export class WorkspaceTools {
+export class WorkspaceTools implements vscode.Disposable {
   readonly instanceId = randomUUID();
   private readonly writes = new SerialQueue();
-  constructor(private readonly log: (message: string) => void) {}
+  readonly reviews: ChangeReviews;
+  readonly tasks: TaskRuns;
+  constructor(private readonly log: (message: string) => void, private readonly record: (record: CallRecord) => void = () => undefined) {
+    this.reviews = new ChangeReviews(changes => this.writes.run(async () => {
+      const started = Date.now();
+      try { const result = await this.applyChanges(changes); this.record({ tool: 'review_accept', target: changes.map(item => item.uri.fsPath).join(', '), code: 'OK', durationMs: Date.now() - started, time: new Date().toISOString() }); return result; }
+      catch (error) { this.record({ tool: 'review_accept', code: error instanceof ToolError ? error.code : 'OPERATION_FAILED', durationMs: Date.now() - started, time: new Date().toISOString() }); throw error; }
+    }));
+    this.tasks = new TaskRuns((name, code, durationMs) => this.record({ tool: 'task_completed', target: name, code, durationMs, time: new Date().toISOString() }));
+  }
+  dispose(): void { this.reviews.dispose(); this.tasks.dispose(); }
+
+  private validateText(text: string): void {
+    if (Buffer.byteLength(text, 'utf8') > MAX_FILE_BYTES || text.includes('\0')) { throw new ToolError('INVALID_TEXT', 'Text must be non-binary and at most 1 MiB.'); }
+  }
+
+  private async prepareChange(args: { path: string; root?: string; text: string; create: boolean; expectedHash?: string; save: boolean }): Promise<FileChange> {
+    this.allowWrite(); this.validateText(args.text);
+    const uri = await this.resolve(args);
+    if (args.create) {
+      try { await vscode.workspace.fs.stat(uri); throw new ToolError('ALREADY_EXISTS', 'File already exists.'); }
+      catch (error) { if (!(error instanceof vscode.FileSystemError) || error.code !== 'FileNotFound') { throw error; } }
+      const parent = await vscode.workspace.fs.stat(vscode.Uri.file(path.dirname(uri.fsPath)));
+      if (parent.type !== vscode.FileType.Directory) { throw new ToolError('NOT_A_DIRECTORY', 'Parent must be a directory.'); }
+      return { uri, original: '', text: args.text, create: true, save: args.save };
+    }
+    if (!args.expectedHash) { throw new ToolError('HASH_REQUIRED', 'Read the file and supply expectedHash before replacing it.'); }
+    const doc = await this.document(uri); this.checkHash(doc, args.expectedHash);
+    return { uri, original: doc.getText(), text: args.text, expectedHash: args.expectedHash, save: args.save };
+  }
+
+  private async submitChanges(changes: FileChange[], preview = false, single = true): Promise<Record<string, unknown>> {
+    this.allowWrite();
+    if (preview || vscode.workspace.getConfiguration('vscodeMcp').get<boolean>('requireApproval', false)) { return this.reviews.submit(changes); }
+    const result = await this.applyChanges(changes);
+    return single ? { ...(result.files as Record<string, unknown>[])[0], ...(result.saveErrors ? { saveErrors: result.saveErrors } : {}) } : result;
+  }
+
+  private async applyChanges(changes: FileChange[]): Promise<Record<string, unknown>> {
+    this.allowWrite();
+    const validated: { change: FileChange; doc?: vscode.TextDocument }[] = [];
+    const seen = new Set<string>();
+    for (const change of changes) {
+      const prepared = await this.prepareChange({ path: change.uri.toString(), text: change.text, create: change.create ?? false, expectedHash: change.expectedHash, save: change.save });
+      const actualPath = await canonicalPath(prepared.uri.fsPath);
+      const identity = process.platform === 'win32' ? actualPath.toLowerCase() : actualPath;
+      if (seen.has(identity)) { throw new ToolError('DUPLICATE_PATH', 'Batch entries must refer to distinct files.'); }
+      seen.add(identity);
+      validated.push({ change: prepared, doc: prepared.create ? undefined : await this.document(prepared.uri) });
+    }
+    const edit = new vscode.WorkspaceEdit();
+    for (const { change, doc } of validated) {
+      if (doc) {
+        this.checkHash(doc, change.expectedHash!);
+        edit.replace(change.uri, new vscode.Range(0, 0, doc.lineCount - 1, doc.lineAt(doc.lineCount - 1).text.length), change.text);
+      } else { edit.createFile(change.uri, { overwrite: false, ignoreIfExists: false }); edit.insert(change.uri, new vscode.Position(0, 0), change.text); }
+    }
+    this.allowWrite();
+    if (!await vscode.workspace.applyEdit(edit)) { throw new ToolError('EDIT_FAILED', 'VS Code rejected the edit; inspect the files before retrying.'); }
+    const files: Record<string, unknown>[] = [];
+    const saveErrors: Record<string, unknown>[] = [];
+    for (const { change } of validated) {
+      const doc = await this.document(change.uri);
+      if (change.save) {
+        try { this.allowWrite(); await this.save(doc); } catch (error) { saveErrors.push({ uri: change.uri.toString(), message: error instanceof Error ? error.message : String(error) }); }
+      }
+      files.push({ ...this.snapshot(doc), saved: !doc.isDirty });
+    }
+    return { applied: true, files, ...(saveErrors.length ? { saveErrors } : {}) };
+  }
 
   private roots(): vscode.WorkspaceFolder[] {
     return (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === 'file');
@@ -103,11 +176,13 @@ export class WorkspaceTools {
         try {
           const data = await handler(z.object(schema).parse(args));
           this.log(`${name} OK ${Date.now() - started}ms`);
+          this.record({ tool: name, target: typeof args.path === 'string' ? args.path.slice(0, 500) : Array.isArray(args.files) ? args.files.map(item => String(item.path).slice(0, 200)).join(', ') : undefined, code: data.status === 'pending' ? 'PENDING_REVIEW' : data.saveErrors ? 'PARTIAL_SAVE' : 'OK', durationMs: Date.now() - started, time: new Date().toISOString() });
           return { content: [{ type: 'text' as const, text: JSON.stringify(data) }], structuredContent: data };
         } catch (error) {
           const code = error instanceof ToolError ? error.code : error instanceof vscode.FileSystemError ? error.code : 'OPERATION_FAILED';
           const data = { error: { code, message: error instanceof Error ? error.message : String(error) } };
           this.log(`${name} ${code} ${Date.now() - started}ms`);
+          this.record({ tool: name, target: typeof args.path === 'string' ? args.path.slice(0, 500) : undefined, code, durationMs: Date.now() - started, time: new Date().toISOString() });
           return { content: [{ type: 'text' as const, text: JSON.stringify(data) }], structuredContent: data, isError: true };
         }
       });
@@ -117,7 +192,7 @@ export class WorkspaceTools {
       instanceId: this.instanceId, vscodeVersion: vscode.version, trusted: vscode.workspace.isTrusted,
       remoteName: vscode.env.remoteName ?? null,
       roots: this.roots().map(folder => ({ name: folder.name, uri: folder.uri.toString(), path: folder.uri.fsPath })),
-      capabilities: { textFiles: true, debugging: false, writes: vscode.workspace.isTrusted && vscode.workspace.getConfiguration('vscodeMcp').get('allowWrites', true), remoteWorkspaces: false },
+      capabilities: { textFiles: true, debugging: false, writes: vscode.workspace.isTrusted && vscode.workspace.getConfiguration('vscodeMcp').get('allowWrites', true), remoteWorkspaces: false, changeReview: true, batchWrites: true, gitQueries: true, languageNavigation: true, taskExecution: vscode.workspace.isTrusted && vscode.workspace.getConfiguration('vscodeMcp').get('tasks.enabled', false), requireApproval: vscode.workspace.getConfiguration('vscodeMcp').get('requireApproval', false) },
       limits: { maxFileBytes: MAX_FILE_BYTES, maxReadCharacters: MAX_TEXT },
       coordinates: '1-based lines and UTF-16 columns; edit range ends are exclusive'
     }));
@@ -182,27 +257,7 @@ export class WorkspaceTools {
     register('file_write', 'Create a text file (create=true) or replace an existing document (expectedHash required). Existing edits stay unsaved unless save=true. Creating a file creates an empty disk file before inserting content; parent directory must exist.', {
       ...locationSchema, text: z.string().max(MAX_FILE_BYTES), create: z.boolean().default(false), expectedHash: expectedHashSchema.optional(), save: z.boolean().default(false)
     }, false, args => this.writes.run(async () => {
-      this.allowWrite();
-      if (Buffer.byteLength(args.text, 'utf8') > MAX_FILE_BYTES || args.text.includes('\0')) { throw new ToolError('INVALID_TEXT', 'Text must be non-binary and at most 1 MiB.'); }
-      const uri = await this.resolve(args);
-      const edit = new vscode.WorkspaceEdit();
-      if (args.create) {
-        try { await vscode.workspace.fs.stat(uri); throw new ToolError('ALREADY_EXISTS', 'File already exists.'); }
-        catch (error) { if (!(error instanceof vscode.FileSystemError) || error.code !== 'FileNotFound') { throw error; } }
-        await vscode.workspace.fs.stat(vscode.Uri.file(path.dirname(uri.fsPath)));
-        edit.createFile(uri, { overwrite: false, ignoreIfExists: false });
-        edit.insert(uri, new vscode.Position(0, 0), args.text);
-      } else {
-        if (!args.expectedHash) { throw new ToolError('HASH_REQUIRED', 'Read the file and supply expectedHash before replacing it.'); }
-        const doc = await this.document(uri);
-        this.checkHash(doc, args.expectedHash);
-        edit.replace(uri, new vscode.Range(0, 0, doc.lineCount - 1, doc.lineAt(doc.lineCount - 1).text.length), args.text);
-      }
-      this.allowWrite();
-      if (!await vscode.workspace.applyEdit(edit)) { throw new ToolError('EDIT_FAILED', 'VS Code rejected the edit.'); }
-      const doc = await this.document(uri);
-      if (args.save) { await this.save(doc); }
-      return { ...this.snapshot(doc), saved: !doc.isDirty };
+      return this.submitChanges([await this.prepareChange(args)]);
     }));
 
     register('file_apply_edits', 'Apply non-overlapping edits to one file with conflict checking. Coordinates are 1-based UTF-16, end exclusive. Leaves changes unsaved unless save=true.', {
@@ -224,11 +279,7 @@ export class WorkspaceTools {
       let result = doc.getText();
       for (const edit of [...edits].reverse()) { result = result.slice(0, edit.start) + edit.text + result.slice(edit.end); }
       if (Buffer.byteLength(result, 'utf8') > MAX_FILE_BYTES || result.includes('\0')) { throw new ToolError('INVALID_TEXT', 'Result must be non-binary and at most 1 MiB.'); }
-      const workspaceEdit = new vscode.WorkspaceEdit();
-      for (const edit of edits) { workspaceEdit.replace(doc.uri, edit.range, edit.text); }
-      if (!await vscode.workspace.applyEdit(workspaceEdit)) { throw new ToolError('EDIT_FAILED', 'VS Code rejected the edit.'); }
-      if (args.save) { await this.save(doc); }
-      return { ...this.snapshot(doc), saved: !doc.isDirty };
+      return this.submitChanges([{ uri: doc.uri, original: doc.getText(), text: result, expectedHash: args.expectedHash, save: args.save }]);
     }));
 
     register('file_save', 'Save one document only if expectedHash still matches. Save participants may format content; the returned hash reflects the result.', {
@@ -237,6 +288,9 @@ export class WorkspaceTools {
       this.allowWrite();
       const doc = await this.document(await this.resolve(args));
       this.checkHash(doc, args.expectedHash);
+      if (vscode.workspace.getConfiguration('vscodeMcp').get<boolean>('requireApproval', false)) {
+        return this.reviews.submit([{ uri: doc.uri, original: doc.getText(), text: doc.getText(), expectedHash: args.expectedHash, save: true }]);
+      }
       await this.save(doc);
       return { ...this.snapshot(doc), saved: !doc.isDirty };
     }));
@@ -285,5 +339,18 @@ export class WorkspaceTools {
       }
       return { diagnostics, total, truncated: total > args.limit, completeness: 'Current diagnostics only; language service readiness is not guaranteed.' };
     });
+    const changeSchema = z.object({ ...locationSchema, text: z.string().max(MAX_FILE_BYTES), create: z.boolean().default(false), expectedHash: expectedHashSchema.optional(), save: z.boolean().default(false) });
+    for (const [name, preview] of [['files_write', false], ['files_preview', true]] as const) {
+      register(name, preview ? 'Submit up to 20 file replacements/creations for user review without modifying files. Query proposal_get for the result.' : 'Prevalidate up to 20 distinct file replacements/creations, then apply one WorkspaceEdit. Saves are per-file and may partially fail. May return a pending proposal when approval is enabled.', { files: z.array(changeSchema).min(1).max(20) }, false, args => this.writes.run(async () => {
+        if (args.files.reduce((sum, item) => sum + Buffer.byteLength(item.text), 0) > 4 * MAX_FILE_BYTES) { throw new ToolError('BATCH_TOO_LARGE', 'Batch text is limited to 4 MiB.'); }
+        const changes: FileChange[] = [];
+        for (const file of args.files) { changes.push(await this.prepareChange(file)); }
+        const paths = await Promise.all(changes.map(async item => { const actual = await canonicalPath(item.uri.fsPath); return process.platform === 'win32' ? actual.toLowerCase() : actual; }));
+        if (new Set(paths).size !== paths.length) { throw new ToolError('DUPLICATE_PATH', 'Batch entries must refer to distinct files.'); }
+        return this.submitChanges(changes, preview, false);
+      }));
+    }
+    register('proposal_get', 'Get a user review proposal status: pending, applying, accepted, rejected, or failed.', { proposalId: z.string().uuid() }, true, async args => this.reviews.status(args.proposalId));
+    registerAdvanced(register, { resolve: input => this.resolve(input), document: uri => this.document(uri), position: (doc, position) => this.position(doc, position), tasks: this.tasks });
   }
 }

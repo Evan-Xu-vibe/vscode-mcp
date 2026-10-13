@@ -28,7 +28,7 @@ export class McpHttpService {
     listener.requestTimeout = 15_000;
     listener.headersTimeout = 10_000;
     await new Promise<void>((resolve, reject) => {
-      listener.once('error', reject);
+      listener.once('error', error => reject((error as NodeJS.ErrnoException).code === 'EADDRINUSE' ? new Error(`端口 ${port} 已被占用。请在插件设置中更换固定端口，或设为 0 自动分配。`) : error));
       listener.listen(port, '127.0.0.1', () => { listener.removeListener('error', reject); resolve(); });
     });
     listener.on('error', error => this.log(`Listener error: ${error.message}`));

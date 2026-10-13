@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { get } from 'node:http';
+import { createServer, get } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpHttpService, validateKey } from '../server';
@@ -81,4 +81,18 @@ test('invalid custom keys fail before the server starts', async () => {
     assert.equal(service.connection, undefined);
   }
   assert.equal(validateKey('x'.repeat(1024)), true);
+});
+
+test('occupied fixed ports report actionable errors and can be retried', async () => {
+  const blocker = createServer();
+  await new Promise<void>(resolve => blocker.listen(0, '127.0.0.1', resolve));
+  const address = blocker.address();
+  assert.ok(address && typeof address !== 'string');
+  const service = new McpHttpService(() => undefined, () => undefined);
+  try {
+    await assert.rejects(service.start(address.port), /已被占用/);
+    assert.equal(service.connection, undefined);
+  } finally { await new Promise<void>(resolve => blocker.close(() => resolve())); }
+  try { assert.equal(new URL((await service.start(address.port)).url).port, String(address.port)); }
+  finally { await service.stop(); }
 });

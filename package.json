@@ -2,7 +2,7 @@
   "name": "vscode-mcp",
   "displayName": "VSCode MCP",
   "description": "通过本地 MCP 服务向外部 Agent 提供 VS Code 工作区、文件编辑和诊断能力",
-  "version": "0.1.3",
+  "version": "0.2.1",
   "private": true,
   "engines": {
     "vscode": "^1.85.0"
@@ -25,16 +25,34 @@
       { "command": "vscode-mcp.stop", "title": "停止 MCP 服务", "category": "VSCode MCP", "icon": "$(debug-stop)" },
       { "command": "vscode-mcp.copyConnection", "title": "复制 MCP 连接信息", "category": "VSCode MCP", "icon": "$(copy)" },
       { "command": "vscode-mcp.showLog", "title": "查看调用日志", "category": "VSCode MCP", "icon": "$(output)" },
-      { "command": "vscode-mcp.openSettings", "title": "打开插件设置", "category": "VSCode MCP", "icon": "$(settings-gear)" },
+      { "command": "vscode-mcp.openSettings", "title": "显示侧边栏配置", "category": "VSCode MCP", "icon": "$(settings-gear)" },
+      { "command": "vscode-mcp.toggleAutoStart", "title": "切换自动启动", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.toggleWrites", "title": "切换文件修改权限", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.toggleApproval", "title": "切换修改确认", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.toggleTasks", "title": "切换任务执行", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.configureTasks", "title": "配置允许的任务", "category": "VSCode MCP" },
       { "command": "vscode-mcp.toggleAuth", "title": "切换连接验证", "category": "VSCode MCP" },
       { "command": "vscode-mcp.setKey", "title": "设置自定义 Key", "category": "VSCode MCP" },
-      { "command": "vscode-mcp.clearKey", "title": "清除自定义 Key", "category": "VSCode MCP" }
+      { "command": "vscode-mcp.clearKey", "title": "清除自定义 Key", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.restart", "title": "重启 MCP 服务", "category": "VSCode MCP", "icon": "$(refresh)" },
+      { "command": "vscode-mcp.copyClient", "title": "复制客户端配置", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.copyCodex", "title": "复制 Codex 配置", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.copyOpenCode", "title": "复制 OpenCode 配置", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.setPort", "title": "设置连接端口", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.clearHistory", "title": "清除调用记录", "category": "VSCode MCP", "icon": "$(clear-all)" },
+      { "command": "vscode-mcp.reviewOpen", "title": "查看待确认修改", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.reviewAccept", "title": "接受待确认修改", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.reviewReject", "title": "拒绝待确认修改", "category": "VSCode MCP" }
     ],
     "viewsContainers": {
       "activitybar": [{ "id": "vscode-mcp", "title": "VSCode MCP", "icon": "resources/mcp.svg" }]
     },
     "views": {
-      "vscode-mcp": [{ "id": "vscode-mcp.controls", "name": "服务控制", "contextualTitle": "VSCode MCP" }]
+      "vscode-mcp": [
+        { "id": "vscode-mcp.controls", "name": "服务控制", "contextualTitle": "VSCode MCP" },
+        { "id": "vscode-mcp.reviews", "name": "待确认修改" },
+        { "id": "vscode-mcp.calls", "name": "调用记录" }
+      ]
     },
     "menus": {
       "view/title": [
@@ -42,7 +60,8 @@
         { "command": "vscode-mcp.stop", "when": "view == vscode-mcp.controls && vscodeMcp.running", "group": "navigation@1" },
         { "command": "vscode-mcp.copyConnection", "when": "view == vscode-mcp.controls && vscodeMcp.running", "group": "navigation@2" },
         { "command": "vscode-mcp.showLog", "when": "view == vscode-mcp.controls", "group": "navigation@3" },
-        { "command": "vscode-mcp.openSettings", "when": "view == vscode-mcp.controls", "group": "navigation@4" }
+        { "command": "vscode-mcp.openSettings", "when": "view == vscode-mcp.controls", "group": "navigation@4" },
+        { "command": "vscode-mcp.clearHistory", "when": "view == vscode-mcp.calls", "group": "navigation@1" }
       ]
     },
     "configuration": {
@@ -51,7 +70,10 @@
         "vscodeMcp.autoStart": { "type": "boolean", "default": false, "description": "窗口启动后自动启动 MCP 服务（修改后重新加载窗口）。" },
         "vscodeMcp.port": { "type": "integer", "default": 0, "minimum": 0, "maximum": 65535, "description": "本地监听端口，0 表示自动分配。修改后停止并重新启动服务。" },
         "vscodeMcp.auth.enabled": { "type": "boolean", "default": true, "description": "是否要求客户端提供 Bearer Key。修改后重启 MCP 服务。自定义 Key 通过侧边栏设置并存入 VS Code 密钥存储。" },
-        "vscodeMcp.allowWrites": { "type": "boolean", "default": true, "description": "允许客户端创建、修改和保存工作区文件。" }
+        "vscodeMcp.allowWrites": { "type": "boolean", "default": true, "description": "允许客户端创建、修改和保存工作区文件。" },
+        "vscodeMcp.requireApproval": { "type": "boolean", "default": false, "description": "将文件修改和保存请求放入待确认修改面板，由用户接受后执行。立即生效。" },
+        "vscodeMcp.tasks.enabled": { "type": "boolean", "default": false, "description": "允许 Agent 执行已有 VS Code 任务。仅受信任工作区可用，同时需要配置允许的任务名称。" },
+        "vscodeMcp.tasks.allowedNames": { "type": "array", "items": { "type": "string" }, "default": [], "description": "允许 Agent 执行的 VS Code 任务名称，按名称精确匹配。" }
       }
     }
   },
@@ -62,7 +84,7 @@
     "check": "tsc --noEmit -p ./",
     "package": "vsce package --allow-missing-repository --no-rewrite-relative-links --no-dependencies",
     "test": "npm run compile && node scripts/test.mjs",
-    "test:unit": "npm run compile && node --test out/test/core.test.js out/test/server.test.js"
+    "test:unit": "npm run compile && node --test out/test/core.test.js out/test/server.test.js out/test/connection.test.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
