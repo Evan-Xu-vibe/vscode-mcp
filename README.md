@@ -4,7 +4,7 @@
 
 ## 使用
 
-1. 在扩展面板的菜单中选择 **Install from VSIX...**，安装 `vscode-mcp-0.4.0.vsix` 并重新加载窗口；或按下面的开发步骤运行。
+1. 在扩展面板的菜单中选择 **Install from VSIX...**，安装 `vscode-mcp-0.5.0.vsix` 并重新加载窗口；或按下面的开发步骤运行。
 2. 打开要提供给 Agent 的本机工作区。
 3. 点击左侧活动栏的 **VSCode MCP** 插头图标，在“服务控制”侧边栏点击 **启动服务**。
 4. 按需切换连接验证、设置 Key 和固定端口，点击 **立即重启以应用设置**。侧边栏分别显示当前生效验证和下次启动设置；端口被占用时会提示更换端口。
@@ -74,6 +74,13 @@ http_headers = { Authorization = "Bearer 实际凭据" }
 | `files_preview` / `proposal_get` | 提交修改预览并查询用户接受或拒绝的结果 |
 | `git_status` / `git_diff` / `git_log` | 查询磁盘上的 Git 状态、差异和提交记录 |
 | `symbols_get` / `definitions_get` / `references_get` | 通过语言服务查询文件符号、定义和引用 |
+| `hover_get` / `completions_get` / `signature_help_get` | 查询悬浮说明、补全建议和函数签名，不应用补全或执行命令 |
+| `type_definitions_get` / `implementations_get` | 查询类型定义和实现位置 |
+| `workspace_symbols_get` / `call_hierarchy_get` | 搜索工作区符号，查询传入 / 传出调用关系 |
+| `debug_configurations` / `debug_sessions` / `debug_start` / `debug_stop` | 列出已有调试配置与会话，启动 / 停止调试 |
+| `debug_breakpoints_get` / `debug_breakpoint_add` / `debug_breakpoint_remove` | 查询、新增和移除工作区源码断点 |
+| `debug_threads` / `debug_stack` / `debug_scopes` / `debug_variables` | 查询线程、暂停调用栈、作用域和变量 |
+| `debug_control` / `debug_evaluate` | 暂停、继续、单步执行，以及独立授权的表达式求值 |
 | `tasks_list` / `task_run` / `task_status` / `task_stop` | 列出已有任务，运行允许的任务、查询退出码和停止任务 |
 | `terminals_list` / `terminal_create` / `terminal_close` | 列出、创建及关闭 VS Code 内置终端 |
 | `terminal_write` / `terminal_execute` / `terminal_read` | 输入文字或控制字符、执行命令、增量读取命令输出和退出码 |
@@ -106,6 +113,16 @@ Windows 上可选择 PowerShell 7 或 Git Bash 作为默认终端；Windows Powe
 
 每个终端保留最近 256 Ki 个 UTF-16 字符，单次读取最多 64 Ki；下次请求传上次的 `nextOffset`。`truncated=true` 表示先前内容已被淘汰，`hasMore=true` 表示还有缓存未读。命令 `completed` 后仍需检查 `outputPending` 和 `exitCode`（`null` 表示未知）。`terminal_execute` 可能中断正在运行的命令；返回的状态对应最近捕获的命令。关闭权限立即停止捕获并清空缓存。关闭终端后保留最近 20 个终端的输出；每个窗口最多打开 10 个 MCP 创建的终端。停止 HTTP 服务不会关闭终端，终端由 VS Code 管理。
 
+## 代码理解与调试
+
+代码理解工具调用已安装语言服务，支持未保存文档；坐标按 1-based 行 / UTF-16 列计算。补全仅返回建议，不插入内容或执行补全命令；片段保留原始语法。类型定义、实现位置、工作区符号和调用关系仅返回工作区内的位置。没有对应语言插件时可能返回空结果；单次语言服务请求超过 10 秒返回 `LANGUAGE_TIMEOUT`。接口使用 [VS Code 内置语言服务命令](https://code.visualstudio.com/api/references/commands)。
+
+调试默认关闭，在侧边栏开启 **允许调试控制**（`vscodeMcp.debug.enabled`）。仅支持本机受信任工作区及已有 `launch.json` 中的唯一名称配置，不接收任意调试配置或任意 DAP 请求。启动可能运行配置中的 `preLaunchTask`，此权限独立于任务允许列表。程序运行、单步和变量展开可能产生副作用；变量中可能包含敏感信息。条件断点 / 命中条件 / 日志表达式和 `debug_evaluate` 还需开启 **允许调试表达式求值**（`vscodeMcp.debug.allowEvaluation`），可能执行任意程序代码。
+
+典型流程：`debug_configurations` → `debug_start` → `debug_sessions` → `debug_threads` → `debug_stack` → `debug_scopes` → `debug_variables`。暂停后从 `debug_sessions` 取得 `sessionId` / `stopId` / `threadId`；栈、作用域、变量和求值均需携带当前 `stopId`，帧与变量引用必须来自该暂停状态的前序返回。继续 / 单步 / 再次暂停使旧引用失效，返回 `DEBUG_STATE_CHANGED`，应重新查询。`debug_control` 使用 `pause`、`continue`、`next`、`stepIn`、`stepOut`；除暂停外均需当前 `stopId`。调试器不支持的请求返回 `DEBUG_REQUEST_FAILED`。单次 DAP 请求限 10 秒，超时不代表命令未执行，需重新检查状态。
+
+会话状态从调试器事件追踪；已在插件启动前暂停的会话可能显示 `unknown`，需要观察一次新的暂停事件。关闭调试权限不会停止程序；停止服务 / 卸载扩展不会主动关闭已有调试会话。源文件路径限制在工作区，外部运行库帧仅返回名称及行列、`uri=null`，不提供外部源码读取。变量值并非工作区文件，仍可读取。实际能力依赖所选调试器，使用 [VS Code Debug API](https://code.visualstudio.com/api/references/vscode-api#debug)。
+
 ## 文件管理、搜索与重构
 
 移动和删除前先调用 `resource_info` 获取 `fingerprint`，操作时提供 `expectedFingerprint`。资源工具支持二进制文件，目录树限制 1000 个节点和 16 MiB 文件内容。目标父目录必须存在，移动不覆盖已有目标。非空目录删除须显式指定 `recursive: true`。工作区根目录、Git 元数据和符号链接 / 目录联接受保护；存在未保存文档时禁止移动或删除。开启修改确认或传入 `preview: true` 后进入待确认面板，接受时重新检查状态。目录创建和资源操作会立即落盘；目录删除不进入回收站，也不支持文本编辑撤销。
@@ -135,13 +152,15 @@ Windows 上可选择 PowerShell 7 或 Git Bash 作为默认终端；Windows Powe
 | `vscodeMcp.requireApproval` | `false` | 修改与保存先进入待确认修改面板，立即生效 |
 | `vscodeMcp.tasks.enabled` | `false` | 是否允许执行任务，仅受信任工作区可用 |
 | `vscodeMcp.terminals.enabled` | `false` | 独立控制终端读写，默认关闭；读取输出需要 VS Code 1.93+ 和 Shell Integration |
+| `vscodeMcp.debug.enabled` | `false` | 允许调试启动 / 停止、断点、单步、调用栈及变量读取 |
+| `vscodeMcp.debug.allowEvaluation` | `false` | 允许调试表达式求值、条件断点与日志表达式；需同时开启调试 |
 | `vscodeMcp.tasks.allowedNames` | `[]` | 允许执行的任务名称，精确匹配 |
 | `vscodeMcp.search.exclude` | 依赖 / 构建目录 | 搜索排除 glob，可从侧边栏增删；`.git` 始终排除 |
 | `vscodeMcp.search.maxFiles` | `10000` | 候选文件上限，100–50000，可分页继续扫描 |
 
 服务仅监听 `127.0.0.1`，验证开启时使用自定义或随机 Bearer Key，所有模式均检查 Host/Origin；路径限定在工作区，拒绝指向工作区外的符号链接和目录联接。未受信任工作区禁止文件修改。每个窗口有独立服务，随机 Key 每次启动生成，自定义 Key 由此扩展的密钥存储保存。
 
-当前支持本机文本文件和 Streamable HTTP 的无状态 JSON 响应模式，不提供 SSE 事件订阅、stdio 桥接、调试变量、调试控制或远程工作区。单个文本文件限制 1 MiB，单次读取最多 64 Ki 个字符；HTTP 请求体最多 2 MiB；批量修改最多 20 个文件。搜索每页最多返回 200 个匹配，默认排除依赖、Git 和构建目录。结果中的 `nextCursor`、`discoveryTruncated`、`skippedFiles` 必须检查。诊断为空不代表语言服务已完成检查。
+当前支持本机文本文件和 Streamable HTTP 的无状态 JSON 响应模式，不提供 SSE 事件订阅、stdio 桥接或远程工作区。单个文本文件限制 1 MiB，单次读取最多 64 Ki 个字符；HTTP 请求体最多 2 MiB；批量修改最多 20 个文件。搜索每页最多返回 200 个匹配，默认排除依赖、Git 和构建目录。结果中的 `nextCursor`、`discoveryTruncated`、`skippedFiles` 必须检查。诊断为空不代表语言服务已完成检查。
 
 ## 开发
 
@@ -172,7 +191,9 @@ $env:VSCODE_EXECUTABLE_PATH = 'E:\Software\Microsoft VS Code\Code.exe'
 npm.cmd test
 ```
 
-测试覆盖 37 个工具的发现、请求认证、连接自检与外部请求区分、路径越界、未保存内容、修改冲突、批量预校验、资源创建 / 移动 / 删除及确认、超过 200 文件的分页搜索、正则超时、排除配置、重构预览、Git 查询、任务退出码与停止、终端权限 / 输入 / 输出分页 / 退出码、客户端配置复制及固定端口重启。Windows 上设置 `MCP_TEST_SHELL` 为 PowerShell 7 的可执行文件路径，并使用 VS Code 1.93+，可额外验证真实终端 Shell Integration 输出读取。
+测试覆盖 57 个工具的发现、请求认证、连接自检与外部请求区分、路径越界、未保存内容、修改冲突、批量预校验、资源创建 / 移动 / 删除及确认、超过 200 文件的分页搜索、正则超时、排除配置、重构预览、Git 查询、任务退出码与停止、终端权限 / 输入 / 输出分页 / 退出码、客户端配置复制及固定端口重启。Windows 上设置 `MCP_TEST_SHELL` 为 PowerShell 7 的可执行文件路径，并使用 VS Code 1.93+，可额外验证真实终端 Shell Integration 输出读取。
+
+设置 MCP_TEST_DEBUG=1 可启用真实 Node.js 调试集成测试，覆盖调用栈、作用域、变量、表达式求值、单步和暂停引用失效；测试宿主需包含内置 JavaScript 调试器。
 
 ## 工程结构
 
@@ -184,6 +205,8 @@ npm.cmd test
 - `src/history.ts`：调用记录面板。
 - `src/tasks.ts`：VS Code 任务执行与状态追踪。
 - `src/terminals.ts`：内置终端控制、Shell Integration 输出捕获和增量读取。
+- `src/language.ts`：悬浮、补全、签名、类型定义、实现、工作区符号与调用层级查询。
+- `src/debugger.ts`：调试权限、会话与暂停状态、断点、DAP 查询和控制。
 - `src/connection.ts`：客户端配置生成。
 - `src/resources.ts`：文件 / 目录快照与管理工具。
 - `src/search.ts`：分页搜索、排除规则与正则工作线程。

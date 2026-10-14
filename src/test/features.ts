@@ -20,7 +20,7 @@ export async function testFeatures(client: Client, root: vscode.WorkspaceFolder)
     assert.equal(result.status, 'accepted', JSON.stringify(result)); return result;
   };
   const health = await vscode.commands.executeCommand<HealthReport>('vscode-mcp.checkConnection');
-  assert.equal(health?.passed, true); assert.equal(health?.toolCount, 37);
+  assert.equal(health?.passed, true); assert.equal(health?.toolCount, 57);
 
   // Resource operations share the approval queue and recheck the entire captured tree.
   const directory = await call('directory_create', { path: 'resource-test', preview: true });

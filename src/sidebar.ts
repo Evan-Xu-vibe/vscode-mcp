@@ -75,6 +75,11 @@ export class McpSidebar implements vscode.TreeDataProvider<vscode.TreeItem>, vsc
     const terminals = row('terminals', '允许终端读写', 'terminal', 'vscode-mcp.toggleTerminals', `${configuration.get<boolean>('terminals.enabled', false) ? '已开启' : '已关闭'}${!vscode.workspace.isTrusted ? ' · 工作区未受信任' : ''}`);
     terminals.tooltip = '点击切换，立即生效。允许读取命令输出和发送任意命令 / 输入；命令可访问工作区外。输出读取需要 VS Code 1.93+ 及 Shell Integration，不包含已有历史。';
     items.push(terminals);
+    const debugging = row('debug', '允许调试控制', 'debug-alt', 'vscode-mcp.toggleDebug', `${configuration.get<boolean>('debug.enabled', false) ? '已开启' : '已关闭'}${!vscode.workspace.isTrusted ? ' · 工作区未受信任' : ''}`);
+    debugging.tooltip = '允许启动调试、管理断点、单步执行、读取调用栈和变量。启动可能执行 preLaunchTask；变量中可能包含敏感信息。仅本机受信任工作区可用，关闭后不会停止程序。';
+    const evaluation = row('debugEvaluation', '允许调试表达式求值', 'symbol-variable', 'vscode-mcp.toggleDebugEvaluation', configuration.get<boolean>('debug.allowEvaluation', false) ? '已开启' : '已关闭');
+    evaluation.tooltip = '允许表达式求值、条件断点和日志表达式，可能执行任意程序代码。同时需要开启调试控制。';
+    items.push(debugging, evaluation);
     const exclusions = configuration.get<string[]>('search.exclude', ['**/{node_modules,out,dist,.vscode-test}/**']);
     const excluded = row('searchExclude', '搜索排除目录 / 文件', 'filter', 'vscode-mcp.configureSearchExclude', `${exclusions.length} 条规则`);
     excluded.tooltip = `点击增删 glob 规则，.git 始终排除。\n${exclusions.join('\n')}`;

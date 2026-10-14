@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-const unit = spawnSync(process.execPath, ['--test', 'out/test/core.test.js', 'out/test/server.test.js', 'out/test/connection.test.js', 'out/test/terminals.test.js'], { stdio: 'inherit' });
+const unit = spawnSync(process.execPath, ['--test', 'out/test/core.test.js', 'out/test/server.test.js', 'out/test/connection.test.js', 'out/test/terminals.test.js', 'out/test/debugger.test.js'], { stdio: 'inherit' });
 if (unit.status !== 0) { process.exit(unit.status ?? 1); }
 const temp = await mkdtemp(path.join(os.tmpdir(), 'vscode-mcp-integration-'));
 try {
@@ -21,6 +21,7 @@ try {
   await runTests({
     extensionDevelopmentPath: process.env.MCP_EXTENSION_UNDER_TEST ?? process.cwd(),
     extensionTestsPath: path.resolve('out/test/integration.js'),
+    extensionTestsEnv: { MCP_TEST_NODE: process.execPath },
     ...(process.env.VSCODE_EXECUTABLE_PATH ? { vscodeExecutablePath: process.env.VSCODE_EXECUTABLE_PATH } : { version: '1.85.0' }),
     launchArgs: [workspace, '--user-data-dir', path.join(temp, 'profile'), '--extensions-dir', path.join(temp, 'extensions'), '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes', '--disable-extensions', '--disable-gpu']
   });

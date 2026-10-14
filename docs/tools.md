@@ -116,6 +116,41 @@
 
 新增错误码：`DUPLICATE_PATH`、`BATCH_TOO_LARGE`、`REVIEW_LIMIT`、`REVIEW_NOT_FOUND`、`REVIEW_NOT_PENDING`、`GIT_FAILED`、`TASKS_DISABLED`、`TASK_NOT_ALLOWED`、`TASK_NOT_FOUND`、`TASK_LIMIT`、`TASK_ALREADY_RUNNING`。已在运行的任务不会被 MCP 接管。
 
+## 代码理解
+
+位置查询参数为 `path`、可选 `root`、`line`、`column`，坐标从 1 开始、列按 UTF-16 计数。可选 `limit=50`（1–200）；全部只读、不执行建议中的命令。查询最新编辑器内容，文件在查询期间变化返回 `VERSION_CONFLICT`；语言请求限 10 秒，无提供者或无结果可能为空。
+
+- `hover_get`：返回 `hovers`（`text` / `range` / `truncated`），Markdown 按数据返回，总正文最多 65536 字符。
+- `completions_get`：可选单字符 `triggerCharacter`，返回 `items`（标签、类型、说明、文档、`insertText`、`snippet`）、`isIncomplete` / `truncated`。不执行补全命令或应用其编辑；未解析建议可能缺少文档和插入文字。
+- `signature_help_get`：可选 `triggerCharacter`，返回 `signatures`、参数说明及 `activeSignature` / `activeParameter`，活动索引从 0 开始。最多返回 20 个签名、每个 40 个参数，检查 `parametersTruncated`。
+- `type_definitions_get` / `implementations_get`：返回工作区内的 `locations`、`total` / `truncated`。
+- `workspace_symbols_get`：`query`（1–1024 字符）、可选 `limit`，返回工作区内 `symbols`、`total` / `truncated`。
+- `call_hierarchy_get`：位置参数、可选 `direction="incoming"`（或 `outgoing`）、`itemIndex=0`（0–199）、`limit`。返回可选调用项 `items`、所选索引 `selected`、`calls`、`total` / `truncated`。调用项和位置均过滤到工作区，最多 200 个准备项、每个调用最多 100 个范围，范围属于调用方。无调用层级提供者时 `items` / `calls` 为空。
+
+正文及列表有长度上限；源于安装的语言插件，内容应作为不可信数据使用。错误码：`LANGUAGE_TIMEOUT`、`VERSION_CONFLICT`、`INVALID_RANGE` 和文件路径错误码。使用 [内置 Provider 命令](https://code.visualstudio.com/api/references/commands)。
+
+## 调试器
+
+`debug_configurations` 可在调试开关关闭时查询配置名称，其余调试工具需本机受信任工作区及 `vscodeMcp.debug.enabled=true`。权限独立于文件修改 / 修改确认 / 任务允许列表，启动已有配置可能执行 `preLaunchTask` 或程序代码。会话必须属于本窗口当前本机工作区；不提供任意调试配置、任意 DAP 请求或外部源码读取。
+
+- `debug_configurations`：无参数，返回配置 `name` / `type` / `request` / `root`，不公开完整配置或环境变量。
+- `debug_sessions`：无参数，返回会话 `sessionId`、名称、类型、根目录、`status`（`unknown` / `running` / `paused`）、`stopId` / `threadId` / `reason`。状态由调试器事件追踪，不表示执行成功。
+- `debug_start`：`name`、可选 `root`，从已有 `launch.json` 选择唯一名称配置，返回 `started` 和会话列表。多根工作区需选根目录；不支持 compound 配置。
+- `debug_stop`：`sessionId`，请求停止所选会话，可能终止程序，返回 `stopRequested`。
+- `debug_breakpoints_get`：无参数，返回工作区源码断点。函数断点和外部源码断点不返回。
+- `debug_breakpoint_add`：`path`、`line`、可选 `root` / `column=1` / `condition` / `hitCondition` / `logMessage`，返回 `breakpointId`。位置必须在文件内；`condition`、`hitCondition` 和 `logMessage` 需额外开启 `debug.allowEvaluation`。
+- `debug_breakpoint_remove`：`breakpointId`，只允许移除工作区源码断点。
+- `debug_threads`：`sessionId`，返回线程 ID 与名称（最多 200 个）。
+- `debug_stack`：`sessionId`、当前 `stopId`、`threadId`、可选 `startFrame=0` / `levels=20`（1–100）。返回 `frames`、`totalFrames` / `nextStartFrame`，帧含 `frameId` / 名称 / 行列 / 工作区 `uri`；外部源码 `uri=null`。适配器可返回内部运行库帧。
+- `debug_scopes`：`sessionId`、当前 `stopId`、来自 `debug_stack` 的 `frameId`，返回 `scopes`（最多 100 个），含可继续读取的 `variablesReference`。
+- `debug_variables`：`sessionId`、当前 `stopId`、前序作用域 / 变量 / 求值返回的 `variablesReference`，可选 `start=0` / `count=50`（1–100）/ `filter="indexed"` 或 `"named"`。返回 `variables`、`total` / `nextStart`；值最多 4096 字符，检查 `valueTruncated`。为兼容忽略分页的调试器，获取后本地分页；展开可能触发调试器求值或程序 getter。
+- `debug_control`：`sessionId`、`threadId`、`action`（`pause` / `continue` / `next` / `stepIn` / `stepOut`），除暂停外需当前 `stopId`。返回请求动作和最新观察状态，不保证已经暂停，应轮询 `debug_sessions`。
+- `debug_evaluate`：`sessionId`、当前 `stopId`、已读取的 `frameId`、`expression`（1–4096 字符）。还需 `vscodeMcp.debug.allowEvaluation=true`，可能执行任意程序代码；以 `watch` 上下文求值。返回 `result`（最多 65536 字符）、`truncated` / `type` / 子变量引用。
+
+每次暂停产生新的 `stopId`；继续 / 单步 / 再次暂停使旧帧与变量引用失效。响应期间状态改变也会被拒绝，必须重新读会话、栈和作用域。会话在插件加载前已暂停可能为 `unknown`，需要新的暂停事件。关闭权限使已授权引用失效，但不停止程序；卸载扩展也不会主动停止会话。DAP 请求限 10 秒；超时后不要假定动作没有发生，需检查当前状态。请求能力取决于调试器，拒绝时返回错误，不视为成功。
+
+错误码：`DEBUG_DISABLED`、`DEBUG_EVALUATION_DISABLED`、`DEBUG_UNSUPPORTED`、`DEBUG_SESSION_NOT_FOUND`、`DEBUG_STATE_CHANGED`、`DEBUG_REFERENCE_INVALID`、`DEBUG_CONFIG_NOT_FOUND`、`DEBUG_START_FAILED`、`DEBUG_BREAKPOINT_NOT_FOUND`、`DEBUG_REQUEST_FAILED`、`DEBUG_TIMEOUT`、`WORKSPACE_UNTRUSTED` 和路径错误码。使用 [Debug API](https://code.visualstudio.com/api/references/vscode-api#debug)。
+
 ## 终端控制
 
 所有终端工具需开启 `vscodeMcp.terminals.enabled` 并信任工作区，只支持本机窗口。此权限与 `allowWrites` / `requireApproval` / 任务允许列表独立；命令可访问工作区外。ID 仅在当前窗口有效。

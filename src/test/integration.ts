@@ -9,6 +9,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { ExtensionApi } from '../extension';
 import { McpSidebar } from '../sidebar';
 import { testFeatures } from './features';
+import { testIntelligence } from './intelligence';
 
 export async function run(): Promise<void> {
   const extension = vscode.extensions.all.find(item => item.packageJSON.name === 'vscode-mcp');
@@ -42,7 +43,7 @@ export async function run(): Promise<void> {
   };
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL(info.url), { requestInit: { headers: { Authorization: `Bearer ${info.token}` } } }));
-    assert.equal((await client.listTools()).tools.length, 37);
+    assert.equal((await client.listTools()).tools.length, 57);
     const workspace = await call('workspace_info');
     assert.equal((workspace.roots as unknown[]).length, 1);
     assert.equal(workspace.trusted, true);
@@ -149,6 +150,7 @@ export async function run(): Promise<void> {
     const diagnostics = await call('diagnostics_get', { path: 'fixture.txt' });
     assert.ok((diagnostics.diagnostics as { message: string }[]).some(item => item.message === 'integration diagnostic'));
     await testFeatures(client, root);
+    await testIntelligence(client, root);
 
     // Batch validation must finish before changing any document.
     const beforeBatch = await call('file_read', { path: 'fixture.txt' });
@@ -285,7 +287,7 @@ export async function run(): Promise<void> {
     const noAuthClient = new Client({ name: 'no-auth-integration', version: '1.0.0' });
     try {
       await noAuthClient.connect(new StreamableHTTPClientTransport(new URL(noAuth.url)));
-      assert.equal((await noAuthClient.listTools()).tools.length, 37);
+      assert.equal((await noAuthClient.listTools()).tools.length, 57);
     } finally { await noAuthClient.close(); }
     await vscode.commands.executeCommand('vscode-mcp.copyCodex');
     assert.equal((await vscode.env.clipboard.readText()).includes('http_headers'), false);
@@ -298,7 +300,7 @@ export async function run(): Promise<void> {
     assert.equal(fixed.authEnabled, true);
     assert.equal(new URL(fixed.url).port, String(fixedPort));
     assert.equal(new URL((await api.restart()).url).port, String(fixedPort));
-    console.log('PASS: 37 tools, dirty buffers, undo, conflicts, batch prevalidation, change review, Git queries, language providers, task exit codes, client configs, fixed port restart and optional authentication.');
+    console.log('PASS: 57 tools, dirty buffers, undo, conflicts, change review, Git queries, code understanding, debugger controls, tasks, terminal output, client configs and authentication.');
   } finally {
     diagnosticCollection.dispose(); await client.close(); await api.stop();
   }

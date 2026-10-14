@@ -2,7 +2,7 @@
   "name": "vscode-mcp",
   "displayName": "VSCode MCP",
   "description": "通过本地 MCP 服务向外部 Agent 提供 VS Code 工作区、文件编辑和诊断能力",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "engines": {
     "vscode": "^1.85.0"
@@ -75,6 +75,8 @@
         "title": "切换任务执行",
         "category": "VSCode MCP"
       },
+      { "command": "vscode-mcp.toggleDebug", "title": "切换调试控制", "category": "VSCode MCP" },
+      { "command": "vscode-mcp.toggleDebugEvaluation", "title": "切换调试表达式求值", "category": "VSCode MCP" },
       {
         "command": "vscode-mcp.toggleTerminals",
         "title": "切换终端读写",
@@ -258,6 +260,8 @@
           "default": false,
           "description": "允许 Agent 读取本机窗口终端输出、创建 / 关闭终端并发送任意命令和输入。命令可访问工作区外，不受文件修改或任务允许列表限制。仅受信任工作区可用；输出读取需要 VS Code 1.93+ 及 Shell Integration，无法补读历史。"
         },
+        "vscodeMcp.debug.enabled": { "type": "boolean", "default": false, "description": "允许 Agent 启动 / 停止本机调试会话、管理断点、单步执行以及读取调用栈和变量。仅受信任工作区可用；可能运行 preLaunchTask，变量可能包含敏感信息。独立于文件和任务权限。" },
+        "vscodeMcp.debug.allowEvaluation": { "type": "boolean", "default": false, "description": "允许 Agent 在暂停帧中求值表达式和创建条件断点 / 日志表达式，可能执行任意程序代码。同时需要 debug.enabled。" },
         "vscodeMcp.tasks.enabled": {
           "type": "boolean",
           "default": false,
@@ -301,7 +305,7 @@
     "check": "tsc --noEmit -p ./",
     "package": "vsce package --allow-missing-repository --no-rewrite-relative-links --no-dependencies",
     "test": "npm run compile && node scripts/test.mjs",
-    "test:unit": "npm run compile && node --test out/test/core.test.js out/test/server.test.js out/test/connection.test.js out/test/terminals.test.js"
+    "test:unit": "npm run compile && node --test out/test/core.test.js out/test/server.test.js out/test/connection.test.js out/test/terminals.test.js out/test/debugger.test.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

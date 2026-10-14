@@ -13,6 +13,8 @@ import { FileResources } from './resources';
 import { FileSearch } from './search';
 import { CodeRefactors } from './refactor';
 import { TerminalControls } from './terminals';
+import { registerLanguage } from './language';
+import { DebugControls } from './debugger';
 
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TEXT = 64 * 1024;
@@ -32,9 +34,11 @@ export class WorkspaceTools implements vscode.Disposable {
   private readonly search: FileSearch;
   private readonly refactors: CodeRefactors;
   private readonly terminals: TerminalControls;
+  private readonly debugger: DebugControls;
   constructor(private readonly log: (message: string) => void, private readonly record: (record: CallRecord) => void = () => undefined) {
     this.search = new FileSearch(input => this.resolve(input), uri => this.document(uri));
     this.terminals = new TerminalControls(input => this.resolve(input));
+    this.debugger = new DebugControls(input => this.resolve(input));
     this.refactors = new CodeRefactors({ resolve: input => this.resolve(input), document: uri => this.document(uri), position: (doc, value) => this.position(doc, value), allowWrite: () => this.allowWrite(), preview: changes => this.writes.run(() => this.submitChanges(changes, true, false)) });
     this.resources = new FileResources({ resolve: input => this.resolve(input), allowWrite: () => this.allowWrite(), submit: (change, preview) => this.writes.run(async () => {
       this.allowWrite();
@@ -55,7 +59,7 @@ export class WorkspaceTools implements vscode.Disposable {
     }));
     this.tasks = new TaskRuns((name, code, durationMs) => this.record({ tool: 'task_completed', target: name, code, durationMs, time: new Date().toISOString() }));
   }
-  dispose(): void { this.reviews.dispose(); this.tasks.dispose(); this.search.dispose(); this.refactors.dispose(); this.terminals.dispose(); }
+  dispose(): void { this.reviews.dispose(); this.tasks.dispose(); this.search.dispose(); this.refactors.dispose(); this.terminals.dispose(); this.debugger.dispose(); }
 
   private validateText(text: string): void {
     if (Buffer.byteLength(text, 'utf8') > MAX_FILE_BYTES || text.includes('\0')) { throw new ToolError('INVALID_TEXT', 'Text must be non-binary and at most 1 MiB.'); }
@@ -193,7 +197,7 @@ export class WorkspaceTools implements vscode.Disposable {
         description: string; inputSchema: z.ZodRawShape;
         annotations: { readOnlyHint: boolean; destructiveHint: boolean; openWorldHint: boolean };
       }, callback: (args: Record<string, unknown>) => Promise<CallToolResult>) => unknown;
-      registerTool.call(server, name, { description, inputSchema: schema, annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, openWorldHint: name.startsWith('terminal') } }, async args => {
+      registerTool.call(server, name, { description, inputSchema: schema, annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, openWorldHint: name.startsWith('terminal') || name.startsWith('debug_') } }, async args => {
         const started = Date.now();
         try {
           const data = await handler(z.object(schema).parse(args));
@@ -214,9 +218,10 @@ export class WorkspaceTools implements vscode.Disposable {
       instanceId: this.instanceId, vscodeVersion: vscode.version, trusted: vscode.workspace.isTrusted,
       remoteName: vscode.env.remoteName ?? null,
       roots: this.roots().map(folder => ({ name: folder.name, uri: folder.uri.toString(), path: folder.uri.fsPath })),
-      capabilities: { textFiles: true, debugging: false, writes: vscode.workspace.isTrusted && vscode.workspace.getConfiguration('vscodeMcp').get('allowWrites', true), remoteWorkspaces: false, changeReview: true, batchWrites: true, gitQueries: true, languageNavigation: true, resourceManagement: true, regexSearch: true, paginatedSearch: true, refactorPreview: true, taskExecution: vscode.workspace.isTrusted && vscode.workspace.getConfiguration('vscodeMcp').get('tasks.enabled', false), requireApproval: vscode.workspace.getConfiguration('vscodeMcp').get('requireApproval', false) },
+      capabilities: { textFiles: true, debugging: vscode.workspace.isTrusted && !vscode.env.remoteName && vscode.workspace.getConfiguration('vscodeMcp').get('debug.enabled', false), codeUnderstanding: true, writes: vscode.workspace.isTrusted && vscode.workspace.getConfiguration('vscodeMcp').get('allowWrites', true), remoteWorkspaces: false, changeReview: true, batchWrites: true, gitQueries: true, languageNavigation: true, resourceManagement: true, regexSearch: true, paginatedSearch: true, refactorPreview: true, taskExecution: vscode.workspace.isTrusted && vscode.workspace.getConfiguration('vscodeMcp').get('tasks.enabled', false), requireApproval: vscode.workspace.getConfiguration('vscodeMcp').get('requireApproval', false) },
       limits: { maxFileBytes: MAX_FILE_BYTES, maxReadCharacters: MAX_TEXT },
       terminals: { enabled: vscode.workspace.isTrusted && !vscode.env.remoteName && vscode.workspace.getConfiguration('vscodeMcp').get('terminals.enabled', false), outputSupported: this.terminals.outputSupported, maxBufferedCharacters: 256 * 1024, maxReadCharacters: MAX_TEXT, historyAvailable: false },
+      debugger: { enabled: vscode.workspace.isTrusted && !vscode.env.remoteName && vscode.workspace.getConfiguration('vscodeMcp').get('debug.enabled', false), allowEvaluation: vscode.workspace.getConfiguration('vscodeMcp').get('debug.allowEvaluation', false) },
       coordinates: '1-based lines and UTF-16 columns; edit range ends are exclusive'
     }));
 
@@ -241,6 +246,8 @@ export class WorkspaceTools implements vscode.Disposable {
 
     this.search.register(register);
     this.terminals.register(register);
+    this.debugger.register(register);
+    registerLanguage(register, { resolve: input => this.resolve(input), document: uri => this.document(uri), position: (doc, value) => this.position(doc, value) });
 
     register('file_write', 'Create a text file (create=true) or replace an existing document (expectedHash required). Existing edits stay unsaved unless save=true. Creating a file creates an empty disk file before inserting content; parent directory must exist.', {
       ...locationSchema, text: z.string().max(MAX_FILE_BYTES), create: z.boolean().default(false), expectedHash: expectedHashSchema.optional(), save: z.boolean().default(false)

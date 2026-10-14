@@ -147,6 +147,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     command('vscode-mcp.toggleApproval', () => toggleConfiguration('requireApproval', false)),
     command('vscode-mcp.toggleTasks', () => toggleConfiguration('tasks.enabled', false)),
     command('vscode-mcp.toggleTerminals', () => toggleConfiguration('terminals.enabled', false)),
+    command('vscode-mcp.toggleDebug', () => toggleConfiguration('debug.enabled', false)),
+    command('vscode-mcp.toggleDebugEvaluation', () => toggleConfiguration('debug.allowEvaluation', false)),
     command('vscode-mcp.setSearchMaxFiles', async value => {
       const input = typeof value === 'number' ? String(value) : await vscode.window.showInputBox({ title: '搜索候选文件上限', value: String(vscode.workspace.getConfiguration('vscodeMcp').get<number>('search.maxFiles', 10000)), prompt: '100–50000；搜索按页扫描，可继续翻页。', validateInput: text => /^\d+$/.test(text) && Number(text) >= 100 && Number(text) <= 50000 ? undefined : '请输入 100–50000 的整数。' });
       if (input === undefined) { return; }
