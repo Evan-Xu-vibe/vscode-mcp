@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
-import type { ConnectionInfo } from './server';
+import type { ConnectionInfo, HealthReport, RequestActivity } from './server';
 
 export class McpSidebar implements vscode.TreeDataProvider<vscode.TreeItem>, vscode.Disposable {
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
-  constructor(private readonly connection: () => ConnectionInfo | undefined, private readonly hasCustomKey: () => boolean, private readonly needsRestart: () => boolean) {}
+  constructor(private readonly connection: () => ConnectionInfo | undefined, private readonly hasCustomKey: () => boolean, private readonly needsRestart: () => boolean,
+    private readonly activity: () => RequestActivity = () => ({ requests: 0, authFailures: 0 }), private readonly health: () => HealthReport | undefined = () => undefined) {}
   refresh(): void { this.changed.fire(); }
   dispose(): void { this.changed.dispose(); }
   getTreeItem(item: vscode.TreeItem): vscode.TreeItem { return item; }
@@ -25,10 +26,22 @@ export class McpSidebar implements vscode.TreeDataProvider<vscode.TreeItem>, vsc
     const configuredWrites = configuration.get<boolean>('allowWrites', true);
     const writes = vscode.workspace.isTrusted && configuredWrites;
     const items = [state];
+    items.push(row('checkConnection', '连接自检', 'pulse', 'vscode-mcp.checkConnection'));
+    const health = this.health();
+    if (health) {
+      const check = row('health', '最近自检', health.passed ? 'pass' : 'error', 'vscode-mcp.checkConnection', health.passed ? '通过' : '未通过');
+      check.tooltip = `${new Date(health.checkedAt).toLocaleString()}\n${health.checks.map(item => `${item.name}：${item.message}`).join('\n')}\n自检成功不代表外部客户端已连接。`; items.push(check);
+    }
     if (connection) {
       const endpoint = row('endpoint', '连接地址', 'link', undefined, connection.url);
       endpoint.tooltip = connection.url;
       items.push(endpoint, row('restart', this.needsRestart() ? '立即重启以应用设置' : '重启服务', 'refresh', 'vscode-mcp.restart'), row('stop', '停止服务', 'debug-stop', 'vscode-mcp.stop'), row('copy', '复制连接信息', 'copy', 'vscode-mcp.copyConnection'), row('client', '复制客户端配置', 'code', 'vscode-mcp.copyClient'));
+      const activity = this.activity();
+      const recent = row('recentRequest', '最近外部请求', 'history', undefined, activity.lastRequestAt ? new Date(activity.lastRequestAt).toLocaleTimeString() : '尚未收到');
+      recent.tooltip = `最近请求：${activity.lastRequestAt ?? '无'}\n最近通过验证：${activity.lastAuthorizedRequestAt ?? '无'}\n请求数：${activity.requests}，验证失败：${activity.authFailures}\n不包含本插件自检请求。`;
+      items.push(recent);
+      const initialized = row('externalClient', '外部客户端初始化', 'debug-disconnect', undefined, activity.lastInitializedAt ? '已收到' : '尚未收到');
+      initialized.tooltip = `客户端：${activity.clientName ?? '未知'}\n最近初始化：${activity.lastInitializedAt ?? '无'}\n最近工具调用：${activity.lastToolCallAt ?? '无'}\n此记录不表示客户端当前仍在线。`; items.push(initialized);
     } else {
       items.push(row('start', '启动服务', 'play', 'vscode-mcp.start'));
     }
@@ -59,6 +72,13 @@ export class McpSidebar implements vscode.TreeDataProvider<vscode.TreeItem>, vsc
     const allowedTasks = row('allowedTasks', '配置允许的任务', 'list-selection', 'vscode-mcp.configureTasks', names.length ? `已允许 ${names.length} 个` : '尚未允许任何任务');
     allowedTasks.tooltip = names.length ? `点击勾选允许的任务，或添加任务名称。\n${names.join('\n')}` : '点击选择允许的已有任务，或手动添加任务名称。';
     items.push(autoStart, permissions, approval, tasks, allowedTasks, row('log', '查看调用日志', 'output', 'vscode-mcp.showLog'));
+    const terminals = row('terminals', '允许终端读写', 'terminal', 'vscode-mcp.toggleTerminals', `${configuration.get<boolean>('terminals.enabled', false) ? '已开启' : '已关闭'}${!vscode.workspace.isTrusted ? ' · 工作区未受信任' : ''}`);
+    terminals.tooltip = '点击切换，立即生效。允许读取命令输出和发送任意命令 / 输入；命令可访问工作区外。输出读取需要 VS Code 1.93+ 及 Shell Integration，不包含已有历史。';
+    items.push(terminals);
+    const exclusions = configuration.get<string[]>('search.exclude', ['**/{node_modules,out,dist,.vscode-test}/**']);
+    const excluded = row('searchExclude', '搜索排除目录 / 文件', 'filter', 'vscode-mcp.configureSearchExclude', `${exclusions.length} 条规则`);
+    excluded.tooltip = `点击增删 glob 规则，.git 始终排除。\n${exclusions.join('\n')}`;
+    items.push(excluded, row('searchMaxFiles', '搜索候选文件上限', 'search', 'vscode-mcp.setSearchMaxFiles', String(configuration.get<number>('search.maxFiles', 10000))));
     return items;
   }
 }

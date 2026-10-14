@@ -1,4 +1,4 @@
-# 工具接口（0.2.1）
+# 工具接口（0.3.0）
 
 每个成功结果同时提供 MCP `structuredContent` 和 JSON 文本。失败返回 `isError: true`，内容格式为 `{ "error": { "code": "...", "message": "..." } }`。参数格式错误由 MCP SDK 校验并返回工具错误。
 
@@ -15,7 +15,7 @@
 - `workspace_info`：无参数。返回 `instanceId`、`roots`、`trusted`、`capabilities`、`limits` 和坐标约定。
 - `files_list`：`path`、可选 `root`，`offset=0`、`limit=100`（最大 500）。返回 `entries`、`total`、`nextOffset`。
 - `file_read`：`path`、可选 `root`、`startLine=1`、`endLine`、`maxCharacters=65536`。返回 `text`、`truncated`、`uri`、`contentHash`、`version`、`isDirty`、`lineCount`、`languageId`。空文件有一行。返回文本不包含指定末行后的换行。
-- `files_search`：`query`（单行字面文本，非正则）、`glob="**/*"`、可选 `root`、`caseSensitive=true`、`limit=50`（最大 200）。返回匹配位置与简短上下文、扫描和跳过数量、截断标识。搜索已有文件的最新文档内容，不扫描未命名文档。
+- `files_search`：新搜索提供 `query`、`regex=false`、`glob="**/*"`、可选 `root` / `exclude`、`caseSensitive=true`、`limit=50`（最大 200）。继续搜索只传 `cursor`。详细分页规则见下文。
 - `editor_context`：无参数。返回允许访问的已加载文档元数据和当前编辑器选区；文档列表最多 200 条，不包含正文。
 - `editor_open`：`path`、可选 `root`、`line=1`、`column=1`。
 - `diagnostics_get`：可选 `path`、`root`，`limit=100`（最大 500）。返回当前已有诊断及严重级别、来源和位置。它不会主动等待语言服务完成分析。
@@ -115,3 +115,56 @@
 必须开启 `vscodeMcp.tasks.enabled`，在 `vscodeMcp.tasks.allowedNames` 中允许对应名称，并信任工作区。仅执行本机工作区已有任务，客户端不能附加命令或参数。同一窗口最多运行 4 个 MCP 任务，保留最近 100 个已完成运行。终端正文无法通过 VS Code 1.85 任务 API 读取，返回结果中的 `output` 指向任务终端的查看方式。插件卸载时终止仍在运行的 MCP 任务。
 
 新增错误码：`DUPLICATE_PATH`、`BATCH_TOO_LARGE`、`REVIEW_LIMIT`、`REVIEW_NOT_FOUND`、`REVIEW_NOT_PENDING`、`GIT_FAILED`、`TASKS_DISABLED`、`TASK_NOT_ALLOWED`、`TASK_NOT_FOUND`、`TASK_LIMIT`、`TASK_ALREADY_RUNNING`。已在运行的任务不会被 MCP 接管。
+
+## 终端控制
+
+所有终端工具需开启 `vscodeMcp.terminals.enabled` 并信任工作区，只支持本机窗口。此权限与 `allowWrites` / `requireApproval` / 任务允许列表独立；命令可访问工作区外。ID 仅在当前窗口有效。
+
+- `terminals_list`：无参数，返回本窗口终端及 `terminalId`、`shellIntegration`、`outputSupported`、最近命令状态。
+- `terminal_create`：可选 `name="MCP Terminal"`、`path="."`、`root`、`show=true`，使用默认 shell；初始目录必须是工作区内目录。最多 10 个 MCP 创建的终端。
+- `terminal_write`：`terminalId`、`text`（最多 64 Ki 字符）、可选 `addNewLine=true` / `show=false`。支持控制字符，例如 `text="\u0003", addNewLine=false` 发送 Ctrl+C。`sent=true` 仅表示已发送输入，不表示执行完成。
+- `terminal_execute`：`terminalId`、`command`（最多 64 Ki 字符）、可选 `show=false`。需 VS Code 1.93+ 及已初始化的 Shell Integration，立即返回，可能中断正在运行的命令。轮询 `terminal_read` 获取最近命令的状态和退出码。
+- `terminal_read`：`terminalId`、可选 `offset=0` / `maxCharacters=65536`（1–65536），返回 `text`、`startOffset`、`nextOffset`、`endOffset`、`truncated`、`hasMore`、`status`、`exitCode`、`outputPending`、`outputError`。下一次传 `nextOffset`；偏移按 UTF-16 字符计算，`truncated=true` 表示请求起点已被淘汰。`completed` 和 `exitCode=0` 表示最近捕获的命令成功，`null` 不表示成功；`outputPending=true` 时输出尚未全部接收。原始输出含 ANSI 序列，仅包含开启权限后捕获的命令输出，不包含已有历史。每终端保留最后 256 Ki 字符，关闭后保留最近 20 个终端；不支持 Shell Integration 的终端可能始终无输出，不能据此判定命令成功。`outputError="OUTPUT_READ_FAILED"` 表示输出流读取失败。
+- `terminal_close`：`terminalId`，关闭所选终端并终止其进程，返回 `closeRequested=true`；可关闭已有终端。
+
+关闭权限清空所有缓存，重新开启后偏移从 0 开始。VS Code 1.85–1.92 支持终端创建 / 输入 / 关闭，读取和执行 API 返回 `SHELL_INTEGRATION_UNAVAILABLE`。新终端需等待 `shellIntegration=true` 才可使用 `terminal_execute`。不补读滚屏历史，不保证任务终端可捕获；使用 [VS Code Shell Integration API](https://code.visualstudio.com/api/references/vscode-api#TerminalShellExecution)。
+
+错误码：`TERMINALS_DISABLED`、`WORKSPACE_UNTRUSTED`、`TERMINAL_UNSUPPORTED`、`TERMINAL_NOT_FOUND`、`TERMINAL_LIMIT`、`SHELL_INTEGRATION_UNAVAILABLE`、`INVALID_RANGE`，目录校验沿用路径工具错误码。
+
+## 文件与目录管理
+
+- `resource_info`：`path`、可选 `root`，返回 `type`、`fingerprint`、目录树 `entries`、字节总量和 `dirty`。指纹覆盖所有节点的相对路径、类型、文件大小和磁盘内容摘要，不包含编辑器未保存修改。
+- `directory_create`：`path`、可选 `root` / `preview=false`。只创建一个目录，父目录必须存在。
+- `resource_move`：`path`、`target`、`expectedFingerprint`、可选 `root` / `preview=false`。支持文件和目录移动或重命名，不覆盖目标；相对目标使用同一个 `root`。
+- `resource_delete`：`path`、`expectedFingerprint`、可选 `root` / `recursive=false` / `preview=false`。非空目录须指定 `recursive=true`。
+
+移动和删除的 `expectedFingerprint` 来自 `resource_info`。开启 `requireApproval` 或指定 `preview=true` 时返回待确认提案；预览显示操作清单与资源快照。接受时重新校验指纹、权限和路径，资源发生变化返回 `VERSION_CONFLICT`。这些操作执行后立即改变磁盘；目录创建和目录删除不属于文本编辑撤销，目录删除直接通过文件系统执行，不进入回收站。资源操作不承诺磁盘层面的原子事务。
+
+不允许管理工作区根目录、Git 元数据、符号链接或目录联接。移动或删除范围内包含未保存文档时返回 `DIRTY_DOCUMENT`。每次快照最多 1000 个节点、16 MiB 文件内容，包括二进制文件。
+
+## 分页搜索
+
+```json
+{ "query": "TODO|FIXME", "regex": true, "glob": "src/**/*.ts", "exclude": ["**/generated/**"], "limit": 50 }
+```
+
+返回 `matches`、`scannedFiles`、`skippedFiles`、`scannedBytes`、`candidateFiles`、`completedFiles`、`nextCursor`、`discoveryTruncated` 和 `truncated`。匹配项带 `uri`、1-based `line` / `column`、匹配 `length`、`preview`、`isDirty` 和当时的 `contentHash`。
+
+有 `nextCursor` 时继续请求 `{ "cursor": "上次返回的游标" }`；其他查询参数不用于更改已有搜索。每页最多扫描 200 文件、16 MiB 内容或约 5 秒，空匹配页也可能有下一页。达到匹配数量上限时，最后可能需要一页空结果确认结束。候选文件列表在新搜索时确定，文件内容在扫描时读取，包括未保存修改；跨页继续扫描同一个文件时若内容变化，返回 `SEARCH_CHANGED`。
+
+游标一次性使用，5 分钟未继续失效；窗口内最多保留或处理 10 个搜索。默认发现最多 10000 个候选文件，通过侧边栏配置 `search.maxFiles`（100–50000）。达到候选上限时 `discoveryTruncated=true`，需提高上限或缩小 glob。`exclude` 可覆盖侧边栏 `search.exclude`；`.git` 始终排除。
+
+正则按单行匹配，支持零宽匹配，列按 UTF-16 计数。正则在独立工作线程执行，单文件匹配超过 500ms 返回 `REGEX_TIMEOUT`，不会阻塞编辑器线程。不支持跨行匹配。
+
+## 代码重构
+
+- `file_format`：`path`、可选 `root`、`expectedHash`，可选 `tabSize`（1–16）和 `insertSpaces`。使用文件对应的格式化提供者。
+- `symbol_rename`：`path`、可选 `root`、`line`、`column`、`newName`、`expectedHash`，调用符号重命名提供者，支持跨文件文字修改。
+- `code_actions_get`：`path`、可选 `root`、`line`、`column`、可选 `endLine` / `endColumn`、`expectedHash`、`kind="quickfix"`、`limit=20`（最大 50）。返回操作的 `id`、`title`、`kind`、`previewable` 和不支持原因。
+- `code_action_preview`：`actionId`，将此前查询的可预览操作放入确认队列。ID 5 分钟后失效。
+
+格式化、重命名和快速修复预览始终先提交待确认提案，用户接受后才应用；默认不保存，与 `requireApproval` 是否开启无关。没有文字修改时返回 `changed=false`。主文档在提供者调用前后校验 `expectedHash`；所有受影响文件在提交预览和接受时校验摘要。
+
+只转换已有工作区文本文件的 `TextEdit`，不执行原始 WorkspaceEdit 中的资源或笔记本操作；返回 `providerTextEditsOnly=true`。最多 20 个文件、每文件 1000 处修改，单文件结果不超过 1 MiB。快速修复若要求命令执行、已禁用或没有可用文字修改，则返回 `previewable=false`，不会运行命令。依赖已安装的语言服务，实际修改可在侧边栏逐文件查看。接口参考 [VS Code 内置 Provider 命令](https://code.visualstudio.com/api/references/commands)。
+
+本版新增错误码：`PROTECTED_PATH`、`SYMLINK_UNSUPPORTED`、`RESOURCE_TOO_LARGE`、`DIRTY_DOCUMENT`、`DIRECTORY_NOT_EMPTY`、`TARGET_REQUIRED`、`INVALID_DESTINATION`、`QUERY_REQUIRED`、`INVALID_REGEX`、`REGEX_TIMEOUT`、`SEARCH_CHANGED`、`SEARCH_CURSOR_EXPIRED`、`SEARCH_LIMIT`、`SEARCH_FAILED`、`UNSUPPORTED_EDIT`、`ACTION_EXPIRED`。

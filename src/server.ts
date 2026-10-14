@@ -2,18 +2,46 @@ import { createServer, IncomingMessage, Server, ServerResponse } from 'node:http
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 export interface ConnectionInfo { url: string; authEnabled: boolean; token?: string; keySource: 'custom' | 'random' | 'none'; }
 export interface AuthOptions { enabled?: boolean; key?: string; }
 export function validateKey(key: string): boolean { return key.length <= 1024 && /^[\x21-\x7e]+$/.test(key); }
 const MAX_BODY = 2 * 1024 * 1024;
+export interface RequestActivity { requests: number; authFailures: number; lastRequestAt?: string; lastAuthorizedRequestAt?: string; lastInitializedAt?: string; lastToolCallAt?: string; clientName?: string; }
+export interface HealthReport { checkedAt: string; passed: boolean; checks: { name: string; passed: boolean; message: string }[]; toolCount?: number; }
 
 export class McpHttpService {
   private listener?: Server;
   private info?: ConnectionInfo;
   private readonly active = new Set<McpServer>();
-  constructor(private readonly register: (server: McpServer) => void, private readonly log: (message: string) => void, private readonly version = '0.1.0') {}
+  private activity: RequestActivity = { requests: 0, authFailures: 0 };
+  private readonly selfCheckMarker = randomBytes(32).toString('hex');
+  constructor(private readonly register: (server: McpServer) => void, private readonly log: (message: string) => void, private readonly version = '0.1.0', private readonly activityChanged: () => void = () => undefined) {}
   get connection(): ConnectionInfo | undefined { return this.info ? { ...this.info } : undefined; }
+  get requests(): RequestActivity { return { ...this.activity }; }
+  async checkConnection(): Promise<HealthReport> {
+    const info = this.connection;
+    const report: HealthReport = { checkedAt: new Date().toISOString(), passed: false, checks: [] };
+    if (!info) { report.checks.push({ name: '服务', passed: false, message: '服务未启动，请先启动服务。' }); return report; }
+    const headers = { 'X-VSCode-MCP-SelfCheck': this.selfCheckMarker, ...(info.authEnabled ? { Authorization: `Bearer ${info.token}` } : {}) };
+    const client = new Client({ name: 'vscode-mcp-self-check', version: this.version });
+    try {
+      const valid = await fetch(info.url, { headers, signal: AbortSignal.timeout(5000) }); await valid.arrayBuffer();
+      report.checks.push({ name: '服务', passed: valid.status === 405, message: valid.status === 405 ? '本机 HTTP 服务响应正常。' : `服务返回 HTTP ${valid.status}。` });
+      if (info.authEnabled) {
+        const invalid = await fetch(info.url, { headers: { 'X-VSCode-MCP-SelfCheck': this.selfCheckMarker, Authorization: `Bearer ${info.token}!-invalid` }, signal: AbortSignal.timeout(5000) }); await invalid.arrayBuffer();
+        report.checks.push({ name: '验证', passed: valid.status === 405 && invalid.status === 401, message: valid.status === 405 && invalid.status === 401 ? '当前 Key 可用，错误 Key 被拒绝。' : `正确 Key HTTP ${valid.status}，错误 Key HTTP ${invalid.status}。` });
+      } else { report.checks.push({ name: '验证', passed: valid.status === 405, message: '验证已关闭，连接无需 Key。' }); }
+      await client.connect(new StreamableHTTPClientTransport(new URL(info.url), { requestInit: { headers, signal: AbortSignal.timeout(5000) } }), { timeout: 5000 });
+      const found = await client.listTools({}, { timeout: 5000 }); report.toolCount = found.tools.length;
+      report.checks.push({ name: 'MCP 初始化', passed: true, message: `初始化和工具发现成功，共 ${found.tools.length} 个工具。` });
+    } catch (error) { report.checks.push({ name: '连接', passed: false, message: error instanceof Error ? error.message : String(error) }); }
+    finally { await client.close().catch(() => undefined); }
+    report.passed = report.checks.every(item => item.passed);
+    return report;
+  }
 
   async start(port = 0, auth: AuthOptions = {}): Promise<ConnectionInfo> {
     if (this.info) { return { ...this.info }; }
@@ -28,13 +56,15 @@ export class McpHttpService {
     listener.requestTimeout = 15_000;
     listener.headersTimeout = 10_000;
     await new Promise<void>((resolve, reject) => {
-      listener.once('error', error => reject((error as NodeJS.ErrnoException).code === 'EADDRINUSE' ? new Error(`端口 ${port} 已被占用。请在插件设置中更换固定端口，或设为 0 自动分配。`) : error));
-      listener.listen(port, '127.0.0.1', () => { listener.removeListener('error', reject); resolve(); });
+      const onError = (error: Error) => reject((error as NodeJS.ErrnoException).code === 'EADDRINUSE' ? new Error(`端口 ${port} 已被占用。请在侧边栏更换固定端口，或设为 0 自动分配。`) : error);
+      listener.once('error', onError);
+      listener.listen(port, '127.0.0.1', () => { listener.removeListener('error', onError); resolve(); });
     });
     listener.on('error', error => this.log(`Listener error: ${error.message}`));
     const address = listener.address();
     if (!address || typeof address === 'string') { listener.close(); throw new Error('No TCP address available.'); }
     this.listener = listener;
+    this.activity = { requests: 0, authFailures: 0 };
     this.info = { url: `http://127.0.0.1:${address.port}/mcp`, authEnabled, token, keySource: authEnabled ? auth.key ? 'custom' : 'random' : 'none' };
     this.log(`Listening on ${this.info.url}`);
     return { ...this.info };
@@ -65,12 +95,18 @@ export class McpHttpService {
     const allowedHosts = [`127.0.0.1:${address.port}`, `localhost:${address.port}`];
     if (!req.headers.host || !allowedHosts.includes(req.headers.host)) { this.reject(res, 403, 'Invalid Host'); return; }
     if (req.headers.origin && !allowedHosts.some(host => req.headers.origin === `http://${host}`)) { this.reject(res, 403, 'Invalid Origin'); return; }
+    const external = req.headers['x-vscode-mcp-selfcheck'] !== this.selfCheckMarker;
+    if (external && req.url === '/mcp') { this.activity.requests++; this.activity.lastRequestAt = new Date().toISOString(); this.activityChanged(); }
     if (token !== undefined) {
       const auth = req.headers.authorization ?? '';
       const expected = `Bearer ${token}`;
-      if (Buffer.byteLength(auth) !== Buffer.byteLength(expected) || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) { this.reject(res, 401, 'Bearer token required'); return; }
+      if (Buffer.byteLength(auth) !== Buffer.byteLength(expected) || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
+        if (external && req.url === '/mcp') { this.activity.authFailures++; this.activityChanged(); }
+        this.reject(res, 401, 'Bearer token required'); return;
+      }
     }
     if (req.url !== '/mcp') { this.reject(res, 404, 'Unknown endpoint'); return; }
+    if (external) { this.activity.lastAuthorizedRequestAt = new Date().toISOString(); this.activityChanged(); }
     // Stateless JSON responses: no server-initiated SSE stream or resumable session.
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); this.reject(res, 405, 'Use POST'); return; }
     if (!req.headers['content-type']?.toLowerCase().startsWith('application/json')) { this.reject(res, 415, 'Use application/json'); return; }
@@ -91,7 +127,15 @@ export class McpHttpService {
     this.active.add(server);
     const cleanup = () => { this.active.delete(server); void server.close().catch(() => undefined); };
     res.once('close', cleanup);
-    try { this.register(server); await server.connect(transport); await transport.handleRequest(req, res, body); }
+    const generation = this.info;
+    try {
+      this.register(server); await server.connect(transport); await transport.handleRequest(req, res, body);
+      if (external && this.info === generation && body && typeof body === 'object' && 'method' in body) {
+        if (body.method === 'initialize' && server.server.getClientVersion()) { this.activity.lastInitializedAt = new Date().toISOString(); this.activity.clientName = server.server.getClientVersion()?.name.slice(0, 128); }
+        if (body.method === 'tools/call') { this.activity.lastToolCallAt = new Date().toISOString(); }
+        this.activityChanged();
+      }
+    }
     catch (error) { cleanup(); throw error; }
   }
 }

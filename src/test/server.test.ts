@@ -96,3 +96,31 @@ test('occupied fixed ports report actionable errors and can be retried', async (
   try { assert.equal(new URL((await service.start(address.port)).url).port, String(address.port)); }
   finally { await service.stop(); }
 });
+
+test('self-check validates MCP and auth without masquerading as an external client', async () => {
+  for (const enabled of [true, false]) {
+    const service = new McpHttpService(server => { server.registerTool('ping', { inputSchema: {} }, async () => ({ content: [{ type: 'text', text: 'pong' }] })); }, () => undefined);
+    assert.equal((await service.checkConnection()).passed, false);
+    const info = await service.start(0, { enabled, key: 'self-check-test-key' });
+    const client = new Client({ name: 'external-client', version: '1.0.0' });
+    try {
+      const report = await service.checkConnection();
+      assert.equal(report.passed, true, JSON.stringify(report));
+      assert.equal(report.toolCount, 1);
+      assert.equal(service.requests.requests, 0);
+      assert.equal(service.requests.lastInitializedAt, undefined);
+      if (enabled) {
+        assert.equal((await fetch(info.url)).status, 401);
+        assert.equal(service.requests.authFailures, 1);
+      }
+      await client.connect(new StreamableHTTPClientTransport(new URL(info.url), { requestInit: { headers: enabled ? { Authorization: `Bearer ${info.token}` } : {} } }));
+      await client.callTool({ name: 'ping' });
+      assert.ok(service.requests.lastRequestAt); assert.ok(service.requests.lastAuthorizedRequestAt);
+      assert.ok(service.requests.lastInitializedAt); assert.ok(service.requests.lastToolCallAt);
+      assert.equal(service.requests.clientName, 'external-client');
+      const beforeCheck = service.requests;
+      assert.equal((await service.checkConnection()).passed, true);
+      assert.deepEqual(service.requests, beforeCheck);
+    } finally { await client.close(); await service.stop(); }
+  }
+});

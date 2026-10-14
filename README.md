@@ -4,7 +4,7 @@
 
 ## 使用
 
-1. 在扩展面板的菜单中选择 **Install from VSIX...**，安装 `vscode-mcp-0.2.1.vsix` 并重新加载窗口；或按下面的开发步骤运行。
+1. 在扩展面板的菜单中选择 **Install from VSIX...**，安装 `vscode-mcp-0.4.0.vsix` 并重新加载窗口；或按下面的开发步骤运行。
 2. 打开要提供给 Agent 的本机工作区。
 3. 点击左侧活动栏的 **VSCode MCP** 插头图标，在“服务控制”侧边栏点击 **启动服务**。
 4. 按需切换连接验证、设置 Key 和固定端口，点击 **立即重启以应用设置**。侧边栏分别显示当前生效验证和下次启动设置；端口被占用时会提示更换端口。
@@ -14,6 +14,8 @@
 状态栏显示当前端口，点击可复制连接信息。服务默认手动启动，停止或关闭窗口后连接不可用。连接验证可选，默认开启：设置自定义 Key 后重启服务仍使用同一个 Key；未设置时每次启动生成随机 Key；关闭验证后无需凭据。默认端口每次启动也可能变化，可以在侧边栏指定固定端口。
 
 所有插件配置均可在 **服务控制** 侧边栏操作，无需打开设置界面：点击连接验证、自动启动、文件修改、修改确认或任务执行即可切换；点击端口或 Key 输入值；点击 **配置允许的任务** 勾选已有任务，也可添加任务名称。取消全部勾选可清空任务允许列表。关闭选择框或输入框不会保存修改。窗口有工作区时写入工作区设置，否则写入用户设置；Key 始终保存在密钥存储中。
+
+侧边栏提供 **连接自检**：检查 HTTP 服务响应、当前 Key、错误 Key 拒绝以及 MCP 初始化和工具发现。**最近外部请求** 显示请求时间与验证失败数量；**外部客户端初始化** 显示最近成功初始化的客户端名称和时间。自检请求不会计入外部记录；初始化记录表示曾成功接入，不表示客户端当前仍在线。服务重新启动后清空外部记录。
 
 自定义 Key 支持 1–1024 个可打印 ASCII 字符，不包含空格，保存在 VS Code 密钥存储中。关闭验证时也可预先设置 Key，之后开启验证并重启服务即可使用。点击 **清除自定义 Key** 后，开启验证的服务下次启动会生成随机 Key。
 
@@ -60,7 +62,7 @@ http_headers = { Authorization = "Bearer 实际凭据" }
 | --- | --- |
 | `workspace_info` | 窗口实例、工作区根目录、权限和限制 |
 | `files_list` | 列出目录，支持分页 |
-| `files_search` | 搜索单行字面文本，支持 glob 和大小写选项 |
+| `files_search` | 字面文本或逐行正则搜索，支持分页、自定义排除和大小写选项 |
 | `file_read` | 读取最新编辑器内容，支持行范围及长度限制 |
 | `file_write` | 创建文件或替换现有文件内容 |
 | `file_apply_edits` | 对单文件应用多处不重叠的范围修改 |
@@ -73,6 +75,12 @@ http_headers = { Authorization = "Bearer 实际凭据" }
 | `git_status` / `git_diff` / `git_log` | 查询磁盘上的 Git 状态、差异和提交记录 |
 | `symbols_get` / `definitions_get` / `references_get` | 通过语言服务查询文件符号、定义和引用 |
 | `tasks_list` / `task_run` / `task_status` / `task_stop` | 列出已有任务，运行允许的任务、查询退出码和停止任务 |
+| `terminals_list` / `terminal_create` / `terminal_close` | 列出、创建及关闭 VS Code 内置终端 |
+| `terminal_write` / `terminal_execute` / `terminal_read` | 输入文字或控制字符、执行命令、增量读取命令输出和退出码 |
+| `resource_info` | 获取文件或目录树的内容指纹，用于移动和删除前校验 |
+| `directory_create` / `resource_move` / `resource_delete` | 创建目录、移动 / 重命名、删除文件或目录，支持预览确认 |
+| `file_format` / `symbol_rename` | 通过语言服务格式化文件或重命名符号，始终先生成预览 |
+| `code_actions_get` / `code_action_preview` | 获取快速修复 / 重构建议，再选择文字修改提交预览 |
 
 详细参数、冲突行为和错误码见 [工具说明](docs/tools.md)。
 
@@ -87,6 +95,24 @@ Agent 可用 `files_preview` 将修改放入 **待确认修改** 面板。点击
 任务执行默认关闭。在侧边栏点击 **允许执行任务** 开启，再点击 **配置允许的任务** 选择允许执行的任务名称，例如 `test`、`build`。Agent 先调用 `tasks_list` 取得 ID，再调用 `task_run`，使用返回的 `runId` 查询 `task_status`。任务通过 VS Code 执行，输出在任务终端中查看，MCP 返回状态和退出码；退出码未知时为 `null`，不能视为成功。仅支持本机工作区已有任务，不提供任意命令参数。任务 API 说明见 [VS Code 官方 API](https://code.visualstudio.com/api/references/vscode-api#tasks)。
 
 Git 查询需要系统安装 Git，不执行提交、推送等修改操作；差异基于磁盘，不包含未保存的编辑器内容。符号、定义和引用查询依赖已安装的语言服务，只返回工作区内的位置。
+
+## 终端读写
+
+在服务控制侧边栏开启 **允许终端读写**（`vscodeMcp.terminals.enabled`，默认关闭），仅本机受信任工作区可用。Agent 可控制本窗口已有终端或创建新终端：先调用 `terminals_list` / `terminal_create` 获取 `terminalId`，再用 `terminal_write` 输入文字，或用 `terminal_execute` 执行命令并轮询 `terminal_read`。关闭终端用 `terminal_close`，会终止其中的进程。此权限独立于文件修改、修改确认和任务允许列表；终端命令按当前用户权限运行，可访问工作区外的文件及网络。
+
+输入、创建和关闭兼容 VS Code 1.85+。读取输出和查询命令退出码需要 VS Code 1.93+ 及终端 Shell Integration；新终端可能需要等待其初始化。没有集成时仍可用 `terminal_write`，但不能保证捕获输出或退出码。使用官方 [Shell Integration API](https://code.visualstudio.com/api/references/vscode-api#TerminalShellExecution)，仅捕获权限开启后命令产生的原始输出（含 ANSI 转义序列），不能补读已有滚屏历史、命令间提示符或不支持集成的任务终端。
+
+Windows 上可选择 PowerShell 7 或 Git Bash 作为默认终端；Windows PowerShell 5 和 cmd 不支持这套 Shell Integration。可按 [官方安装说明](https://code.visualstudio.com/docs/terminal/shell-integration#_installation) 配置集成。
+
+每个终端保留最近 256 Ki 个 UTF-16 字符，单次读取最多 64 Ki；下次请求传上次的 `nextOffset`。`truncated=true` 表示先前内容已被淘汰，`hasMore=true` 表示还有缓存未读。命令 `completed` 后仍需检查 `outputPending` 和 `exitCode`（`null` 表示未知）。`terminal_execute` 可能中断正在运行的命令；返回的状态对应最近捕获的命令。关闭权限立即停止捕获并清空缓存。关闭终端后保留最近 20 个终端的输出；每个窗口最多打开 10 个 MCP 创建的终端。停止 HTTP 服务不会关闭终端，终端由 VS Code 管理。
+
+## 文件管理、搜索与重构
+
+移动和删除前先调用 `resource_info` 获取 `fingerprint`，操作时提供 `expectedFingerprint`。资源工具支持二进制文件，目录树限制 1000 个节点和 16 MiB 文件内容。目标父目录必须存在，移动不覆盖已有目标。非空目录删除须显式指定 `recursive: true`。工作区根目录、Git 元数据和符号链接 / 目录联接受保护；存在未保存文档时禁止移动或删除。开启修改确认或传入 `preview: true` 后进入待确认面板，接受时重新检查状态。目录创建和资源操作会立即落盘；目录删除不进入回收站，也不支持文本编辑撤销。
+
+搜索默认最多发现 10000 个候选文件，可以在侧边栏修改上限（100–50000）及排除 glob。每页最多扫描 200 个文件、16 MiB 正文或约 5 秒，结果有 `nextCursor` 时用它继续，包括匹配为空的页面。正则通过 `regex: true` 启用，按单行匹配；超过 500ms 的单文件匹配会被终止。`.git` 始终排除。候选发现达到上限时返回 `discoveryTruncated`，可以提高上限或缩小 glob。游标只使用一次，5 分钟未继续会失效。
+
+格式化和符号重命名依赖对应语言服务；快速修复可先查询，再选择可预览的 `actionId`。这些操作只转换已有工作区文本文件的修改，始终需要用户在待确认面板接受，默认不保存。需要执行命令的快速修复不自动执行；语言服务建议中的资源操作和笔记本编辑不在文本预览范围内。没有语言服务或无需修改时可能返回空结果。
 
 ## 文件读写约定
 
@@ -108,11 +134,14 @@ Git 查询需要系统安装 Git，不执行提交、推送等修改操作；差
 | `vscodeMcp.allowWrites` | `true` | 是否允许创建、修改和保存文件，立即生效 |
 | `vscodeMcp.requireApproval` | `false` | 修改与保存先进入待确认修改面板，立即生效 |
 | `vscodeMcp.tasks.enabled` | `false` | 是否允许执行任务，仅受信任工作区可用 |
+| `vscodeMcp.terminals.enabled` | `false` | 独立控制终端读写，默认关闭；读取输出需要 VS Code 1.93+ 和 Shell Integration |
 | `vscodeMcp.tasks.allowedNames` | `[]` | 允许执行的任务名称，精确匹配 |
+| `vscodeMcp.search.exclude` | 依赖 / 构建目录 | 搜索排除 glob，可从侧边栏增删；`.git` 始终排除 |
+| `vscodeMcp.search.maxFiles` | `10000` | 候选文件上限，100–50000，可分页继续扫描 |
 
 服务仅监听 `127.0.0.1`，验证开启时使用自定义或随机 Bearer Key，所有模式均检查 Host/Origin；路径限定在工作区，拒绝指向工作区外的符号链接和目录联接。未受信任工作区禁止文件修改。每个窗口有独立服务，随机 Key 每次启动生成，自定义 Key 由此扩展的密钥存储保存。
 
-当前支持本机文本文件和 Streamable HTTP 的无状态 JSON 响应模式，不提供 SSE 事件订阅、stdio 桥接、调试变量、调试控制或远程工作区。单个文本文件限制 1 MiB，单次读取最多 64 Ki 个字符；HTTP 请求体最多 2 MiB；批量修改最多 20 个文件。搜索最多扫描 200 个文件、返回 200 个匹配，默认排除依赖、Git 和构建目录。结果中的 `truncated`、`skippedFiles` 必须检查。诊断为空不代表语言服务已完成检查。
+当前支持本机文本文件和 Streamable HTTP 的无状态 JSON 响应模式，不提供 SSE 事件订阅、stdio 桥接、调试变量、调试控制或远程工作区。单个文本文件限制 1 MiB，单次读取最多 64 Ki 个字符；HTTP 请求体最多 2 MiB；批量修改最多 20 个文件。搜索每页最多返回 200 个匹配，默认排除依赖、Git 和构建目录。结果中的 `nextCursor`、`discoveryTruncated`、`skippedFiles` 必须检查。诊断为空不代表语言服务已完成检查。
 
 ## 开发
 
@@ -143,7 +172,7 @@ $env:VSCODE_EXECUTABLE_PATH = 'E:\Software\Microsoft VS Code\Code.exe'
 npm.cmd test
 ```
 
-测试覆盖 23 个工具的发现、请求认证、路径越界、符号链接、未保存内容、撤销/重做、修改冲突、批量预校验、预览接受与拒绝、Git 查询、语言服务位置过滤、任务权限和真实退出码、客户端配置复制、固定端口重启与端口占用。
+测试覆盖 37 个工具的发现、请求认证、连接自检与外部请求区分、路径越界、未保存内容、修改冲突、批量预校验、资源创建 / 移动 / 删除及确认、超过 200 文件的分页搜索、正则超时、排除配置、重构预览、Git 查询、任务退出码与停止、终端权限 / 输入 / 输出分页 / 退出码、客户端配置复制及固定端口重启。Windows 上设置 `MCP_TEST_SHELL` 为 PowerShell 7 的可执行文件路径，并使用 VS Code 1.93+，可额外验证真实终端 Shell Integration 输出读取。
 
 ## 工程结构
 
@@ -154,7 +183,11 @@ npm.cmd test
 - `src/review.ts`：修改提案、差异预览与确认面板。
 - `src/history.ts`：调用记录面板。
 - `src/tasks.ts`：VS Code 任务执行与状态追踪。
+- `src/terminals.ts`：内置终端控制、Shell Integration 输出捕获和增量读取。
 - `src/connection.ts`：客户端配置生成。
+- `src/resources.ts`：文件 / 目录快照与管理工具。
+- `src/search.ts`：分页搜索、排除规则与正则工作线程。
+- `src/refactor.ts`：语言服务修改转换与重构预览。
 - `src/core.ts`：路径边界、摘要和写入队列。
 - `src/test/`：协议、边界和 VS Code 集成测试。
 - `scripts/`：构建和测试入口。

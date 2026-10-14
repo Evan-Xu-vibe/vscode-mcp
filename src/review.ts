@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
 import { randomUUID } from 'node:crypto';
 import { ToolError } from './core';
+import type { ResourceChange } from './resources';
 
-export interface FileChange { uri: vscode.Uri; original: string; text: string; expectedHash?: string; create?: boolean; save: boolean; }
-interface Proposal { id: string; changes: FileChange[]; files: string[]; status: 'pending' | 'applying' | 'accepted' | 'rejected' | 'failed'; result?: Record<string, unknown>; }
+export interface FileChange { kind?: 'text'; uri: vscode.Uri; original: string; text: string; expectedHash?: string; create?: boolean; save: boolean; }
+export type ReviewChange = FileChange | ResourceChange;
+interface Proposal { id: string; changes: ReviewChange[]; files: string[]; status: 'pending' | 'applying' | 'accepted' | 'rejected' | 'failed'; result?: Record<string, unknown>; }
 export class ReviewNode extends vscode.TreeItem {
   constructor(label: string, public readonly proposalId: string, public readonly fileIndex?: number, expanded = false) {
     super(label, expanded ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None);
@@ -14,10 +16,10 @@ export class ChangeReviews implements vscode.TreeDataProvider<ReviewNode>, vscod
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
   private readonly proposals = new Map<string, Proposal>();
-  constructor(private readonly apply: (changes: FileChange[]) => Promise<Record<string, unknown>>) {}
-  submit(changes: FileChange[]): Record<string, unknown> {
+  constructor(private readonly apply: (changes: ReviewChange[]) => Promise<Record<string, unknown>>) {}
+  submit(changes: ReviewChange[]): Record<string, unknown> {
     const pending = [...this.proposals.values()].filter(item => item.status === 'pending' || item.status === 'applying');
-    const bytes = (items: FileChange[]) => items.reduce((sum, item) => sum + Buffer.byteLength(item.original) + Buffer.byteLength(item.text), 0);
+    const bytes = (items: ReviewChange[]) => items.reduce((sum, item) => sum + Buffer.byteLength(item.original) + Buffer.byteLength(item.text), 0);
     if (pending.length >= 20 || pending.reduce((sum, item) => sum + bytes(item.changes), bytes(changes)) > 10 * 1024 * 1024) {
       throw new ToolError('REVIEW_LIMIT', 'Review queue is full. Accept or reject pending changes first (20 proposals / 10 MiB).');
     }
@@ -72,7 +74,8 @@ export class ChangeReviews implements vscode.TreeDataProvider<ReviewNode>, vscod
       const proposal = this.proposals.get(parent.proposalId);
       if (!proposal || proposal.status !== 'pending') { return []; }
       const files = proposal.changes.map((change, index) => {
-        const item = new ReviewNode(`${vscode.workspace.asRelativePath(change.uri)}${change.create ? '（新建）' : ''}${change.save ? '（保存）' : ''}`, proposal.id, index);
+        const action = change.kind === 'resource' ? ({ mkdir: '创建目录', move: '移动 / 重命名', delete: '删除' }[change.operation]) : change.create ? '新建' : change.save ? '保存' : '修改';
+        const item = new ReviewNode(`${vscode.workspace.asRelativePath(change.uri)}（${action}）`, proposal.id, index);
         item.iconPath = new vscode.ThemeIcon('diff');
         item.command = { command: 'vscode-mcp.reviewOpen', title: '查看差异', arguments: [item] };
         return item;

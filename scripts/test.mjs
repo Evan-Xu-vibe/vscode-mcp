@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-const unit = spawnSync(process.execPath, ['--test', 'out/test/core.test.js', 'out/test/server.test.js', 'out/test/connection.test.js'], { stdio: 'inherit' });
+const unit = spawnSync(process.execPath, ['--test', 'out/test/core.test.js', 'out/test/server.test.js', 'out/test/connection.test.js', 'out/test/terminals.test.js'], { stdio: 'inherit' });
 if (unit.status !== 0) { process.exit(unit.status ?? 1); }
 const temp = await mkdtemp(path.join(os.tmpdir(), 'vscode-mcp-integration-'));
 try {

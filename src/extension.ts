@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ConnectionInfo, McpHttpService, validateKey } from './server';
+import { ConnectionInfo, HealthReport, McpHttpService, validateKey } from './server';
 import { hash, SerialQueue } from './core';
 import { WorkspaceTools } from './tools';
 import { McpSidebar } from './sidebar';
@@ -20,7 +20,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   const log = (message: string) => output.appendLine(`${new Date().toISOString()} ${message}`);
   const history = new CallHistory();
   const tools = new WorkspaceTools(log, record => history.add(record));
-  const current = new McpHttpService(server => tools.register(server), log, context.extension.packageJSON.version as string);
+  const current = new McpHttpService(server => tools.register(server), log, context.extension.packageJSON.version as string, () => sidebar.refresh());
   service = current;
   const lifecycle = new SerialQueue();
   const configurationChanges = new SerialQueue();
@@ -30,6 +30,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   let hasCustomKey = !!initialKey;
   let configuredKeyHash = initialKey ? hash(initialKey) : undefined;
   let activePort: number | undefined;
+  let healthReport: HealthReport | undefined;
   const needsRestart = () => {
     const info = current.connection;
     if (!info) { return false; }
@@ -37,7 +38,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     return activePort !== config.get<number>('port', 0) || info.authEnabled !== config.get<boolean>('auth.enabled', true)
       || (info.authEnabled && (configuredKeyHash ? hash(info.token ?? '') !== configuredKeyHash : info.keySource === 'custom'));
   };
-  const sidebar = new McpSidebar(() => current.connection, () => hasCustomKey, needsRestart);
+  const sidebar = new McpSidebar(() => current.connection, () => hasCustomKey, needsRestart, () => current.requests, () => healthReport);
   const sidebarView = vscode.window.createTreeView('vscode-mcp.controls', { treeDataProvider: sidebar, showCollapseAll: false });
   const updateStatus = () => {
     const connection = current.connection;
@@ -53,7 +54,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       const port = configuration.get<number>('port', 0);
       const enabled = configuration.get<boolean>('auth.enabled', true);
       const info = await current.start(port, { enabled, key: await context.secrets.get(keyStorage) });
-      if (activePort === undefined) { activePort = port; }
+      if (activePort === undefined) { activePort = port; healthReport = undefined; }
       updateStatus(); return info;
   };
   const stop = async () => { await current.stop(); activePort = undefined; updateStatus(); };
@@ -109,6 +110,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       const info = await api.start(); void vscode.window.showInformationMessage(`MCP 服务已启动：${info.url}`);
     }),
     command('vscode-mcp.stop', () => api.stop()),
+    command('vscode-mcp.checkConnection', () => lifecycle.run(async () => {
+      healthReport = await current.checkConnection(); sidebar.refresh();
+      void vscode.window.showInformationMessage(`连接自检${healthReport.passed ? '通过' : '未通过'}：${healthReport.checks.map(check => check.message).join(' ')}`);
+      return healthReport;
+    })),
     command('vscode-mcp.restart', async () => { const info = await api.restart(); void vscode.window.showInformationMessage(`MCP 服务已重启：${info.url}`); return info; }),
     command('vscode-mcp.copyCodex', () => copyClient('codex')),
     command('vscode-mcp.copyOpenCode', () => copyClient('opencode')),
@@ -140,6 +146,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     command('vscode-mcp.toggleWrites', () => toggleConfiguration('allowWrites', true)),
     command('vscode-mcp.toggleApproval', () => toggleConfiguration('requireApproval', false)),
     command('vscode-mcp.toggleTasks', () => toggleConfiguration('tasks.enabled', false)),
+    command('vscode-mcp.toggleTerminals', () => toggleConfiguration('terminals.enabled', false)),
+    command('vscode-mcp.setSearchMaxFiles', async value => {
+      const input = typeof value === 'number' ? String(value) : await vscode.window.showInputBox({ title: '搜索候选文件上限', value: String(vscode.workspace.getConfiguration('vscodeMcp').get<number>('search.maxFiles', 10000)), prompt: '100–50000；搜索按页扫描，可继续翻页。', validateInput: text => /^\d+$/.test(text) && Number(text) >= 100 && Number(text) <= 50000 ? undefined : '请输入 100–50000 的整数。' });
+      if (input === undefined) { return; }
+      if (!/^\d+$/.test(input) || Number(input) < 100 || Number(input) > 50000) { throw new Error('请输入 100–50000 的整数。'); }
+      await updateConfiguration('search.maxFiles', Number(input));
+    }),
+    command('vscode-mcp.configureSearchExclude', async value => {
+      let patterns: unknown = value;
+      if (patterns === undefined) {
+        const saved = vscode.workspace.getConfiguration('vscodeMcp').get<string[]>('search.exclude', ['**/{node_modules,out,dist,.vscode-test}/**']);
+        const choices = saved.map(pattern => ({ label: pattern, pattern, picked: true }));
+        const selected = await vscode.window.showQuickPick([...choices, { label: '$(add) 添加排除规则…', pattern: '', picked: false }], { canPickMany: true, title: '搜索排除规则', placeHolder: '取消勾选可移除；例如 **/vendor/**，.git 始终排除' });
+        if (selected === undefined) { return; }
+        const selectedPatterns = selected.filter(item => item.pattern !== '').map(item => item.pattern);
+        if (selected.some(item => !item.pattern)) {
+          const pattern = await vscode.window.showInputBox({ title: '添加搜索排除规则', prompt: '输入 glob，例如 **/vendor/** 或 **/*.min.js。', validateInput: text => text.trim() ? undefined : '规则不能为空。' });
+          if (pattern === undefined) { return; } selectedPatterns.push(pattern.trim());
+        }
+        patterns = selectedPatterns;
+      }
+      if (!Array.isArray(patterns) || patterns.length > 50 || patterns.some(pattern => typeof pattern !== 'string' || !pattern.trim() || pattern.length > 1024)) { throw new Error('请提供最多 50 条非空 glob 规则，每条最多 1024 字符。'); }
+      await updateConfiguration('search.exclude', [...new Set(patterns)]);
+    }),
     command('vscode-mcp.configureTasks', async value => {
       let names: unknown = value;
       if (names === undefined) {

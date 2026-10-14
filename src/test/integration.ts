@@ -8,6 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { ExtensionApi } from '../extension';
 import { McpSidebar } from '../sidebar';
+import { testFeatures } from './features';
 
 export async function run(): Promise<void> {
   const extension = vscode.extensions.all.find(item => item.packageJSON.name === 'vscode-mcp');
@@ -41,10 +42,53 @@ export async function run(): Promise<void> {
   };
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL(info.url), { requestInit: { headers: { Authorization: `Bearer ${info.token}` } } }));
-    assert.equal((await client.listTools()).tools.length, 23);
+    assert.equal((await client.listTools()).tools.length, 37);
     const workspace = await call('workspace_info');
     assert.equal((workspace.roots as unknown[]).length, 1);
     assert.equal(workspace.trusted, true);
+    await call('terminals_list', {}, 'TERMINALS_DISABLED');
+    await vscode.commands.executeCommand('vscode-mcp.toggleTerminals');
+    try {
+      await call('terminal_create', { path: path.join(root.uri.fsPath, '..') }, 'PATH_DENIED');
+      const terminal = await call('terminal_create', { name: 'MCP integration test', show: !!process.env.MCP_TEST_SHELL });
+      let terminalId = terminal.terminalId;
+      assert.ok((await call('terminals_list')).terminals);
+      if (!(workspace.terminals as { outputSupported: boolean }).outputSupported) {
+        await call('terminal_read', { terminalId }, 'SHELL_INTEGRATION_UNAVAILABLE');
+        await call('terminal_execute', { terminalId, command: 'echo test' }, 'SHELL_INTEGRATION_UNAVAILABLE');
+      } else if (process.env.MCP_TEST_SHELL) {
+        await call('terminal_write', { terminalId, text: 'echo MCP_TERMINAL_TEST', addNewLine: false });
+        await call('terminal_close', { terminalId });
+        const script = process.env.MCP_TEST_INTEGRATION_SCRIPT;
+        const shellArgs = script ? ['-NoLogo', '-NoProfile', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', `. '${script.replace(/'/g, "''")}'`] : ['-NoLogo'];
+        const existing = vscode.window.createTerminal({ name: 'Existing shell integration test', shellPath: process.env.MCP_TEST_SHELL, shellArgs, cwd: root.uri });
+        existing.show(true);
+        const existingList = (await call('terminals_list')).terminals as Record<string, unknown>[];
+        terminalId = existingList.find(item => item.name === existing.name)!.terminalId;
+        const deadline = Date.now() + 20000;
+        let ready = false;
+        while (Date.now() < deadline) {
+          const list = (await call('terminals_list')).terminals as Record<string, unknown>[];
+          if (list.find(item => item.terminalId === terminalId)?.shellIntegration) { ready = true; break; }
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        assert.ok(ready, 'Shell integration initializes in a real VS Code terminal');
+        await call('terminal_execute', { terminalId, command: 'echo MCP_CAPTURE_TEST' });
+        let output: Record<string, unknown> = {};
+        while (Date.now() < deadline) {
+          output = await call('terminal_read', { terminalId });
+          if (output.status === 'completed' && !output.outputPending) { break; }
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        assert.equal(output.status, 'completed', JSON.stringify(output));
+        assert.equal(output.exitCode, 0, JSON.stringify(output));
+        assert.ok(String(output.text).includes('MCP_CAPTURE_TEST'), JSON.stringify(output));
+        assert.equal((await call('terminal_read', { terminalId, offset: output.nextOffset })).text, '');
+        console.log('PASS: real shell integration command output, exit code and incremental reads.');
+      }
+      await call('terminal_write', { terminalId, text: 'echo MCP_TERMINAL_TEST', addNewLine: false });
+      await call('terminal_close', { terminalId });
+    } finally { await vscode.commands.executeCommand('vscode-mcp.toggleTerminals'); }
     await call('file_read', { path: path.join(root.uri.fsPath, '..', 'outside.txt') }, 'PATH_DENIED');
     await call('file_read', { path: 'vscode-remote://ssh-remote/server/secret.txt' }, 'PATH_DENIED');
     const outside = path.join(root.uri.fsPath, '..', 'outside');
@@ -104,6 +148,7 @@ export async function run(): Promise<void> {
     diagnosticCollection.set(doc.uri, [new vscode.Diagnostic(new vscode.Range(0, 0, 0, 1), 'integration diagnostic', vscode.DiagnosticSeverity.Warning)]);
     const diagnostics = await call('diagnostics_get', { path: 'fixture.txt' });
     assert.ok((diagnostics.diagnostics as { message: string }[]).some(item => item.message === 'integration diagnostic'));
+    await testFeatures(client, root);
 
     // Batch validation must finish before changing any document.
     const beforeBatch = await call('file_read', { path: 'fixture.txt' });
@@ -240,7 +285,7 @@ export async function run(): Promise<void> {
     const noAuthClient = new Client({ name: 'no-auth-integration', version: '1.0.0' });
     try {
       await noAuthClient.connect(new StreamableHTTPClientTransport(new URL(noAuth.url)));
-      assert.equal((await noAuthClient.listTools()).tools.length, 23);
+      assert.equal((await noAuthClient.listTools()).tools.length, 37);
     } finally { await noAuthClient.close(); }
     await vscode.commands.executeCommand('vscode-mcp.copyCodex');
     assert.equal((await vscode.env.clipboard.readText()).includes('http_headers'), false);
@@ -253,7 +298,7 @@ export async function run(): Promise<void> {
     assert.equal(fixed.authEnabled, true);
     assert.equal(new URL(fixed.url).port, String(fixedPort));
     assert.equal(new URL((await api.restart()).url).port, String(fixedPort));
-    console.log('PASS: 23 tools, dirty buffers, undo, conflicts, batch prevalidation, change review, Git queries, language providers, task exit codes, client configs, fixed port restart and optional authentication.');
+    console.log('PASS: 37 tools, dirty buffers, undo, conflicts, batch prevalidation, change review, Git queries, language providers, task exit codes, client configs, fixed port restart and optional authentication.');
   } finally {
     diagnosticCollection.dispose(); await client.close(); await api.stop();
   }
