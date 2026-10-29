@@ -2,7 +2,10 @@
   "name": "vscode-mcp",
   "displayName": "VSCode MCP",
   "description": "通过本地 MCP 服务向外部 Agent 提供 VS Code 工作区、文件编辑和诊断能力",
-  "version": "0.5.0",
+  "version": "0.5.1",
+  "publisher": "Evan-Xu-vibe",
+  "repository": { "type": "git", "url": "https://github.com/Evan-Xu-vibe/vscode-mcp.git" },
+  "icon": "resources/icon.png",
   "private": true,
   "engines": {
     "vscode": "^1.85.0"
