@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { assertWorkspacePath, canonicalPath, hash, SerialQueue, ToolError } from './core';
+import { assertWorkspacePath, assertPathNotBlocked, canonicalPath, hash, SerialQueue, ToolError } from './core';
 import { registerAdvanced } from './advanced';
 import { ChangeReviews, FileChange } from './review';
 import { TaskRuns } from './tasks';
@@ -144,10 +144,17 @@ export class WorkspaceTools implements vscode.Disposable {
       throw new ToolError('PATH_DENIED', 'Network paths and alternate data streams are not supported.');
     }
     await assertWorkspacePath(roots.map(folder => folder.uri.fsPath), target);
+    await this.checkBlocked(vscode.Uri.file(target));
     return vscode.Uri.file(target);
   }
 
+  private async checkBlocked(uri: vscode.Uri, includeDescendants = false): Promise<void> {
+    await assertPathNotBlocked(this.roots().map(folder => folder.uri.fsPath), uri.fsPath,
+      vscode.workspace.getConfiguration('vscodeMcp').get<string[]>('blockedPaths', []), includeDescendants);
+  }
+
   private async document(uri: vscode.Uri): Promise<vscode.TextDocument> {
+    await this.resolve({ path: uri.toString() });
     const open = vscode.workspace.textDocuments.find(doc => doc.uri.toString() === uri.toString() && !doc.isClosed);
     if (open) {
       if (Buffer.byteLength(open.getText(), 'utf8') > MAX_FILE_BYTES) { throw new ToolError('FILE_TOO_LARGE', 'Text files are limited to 1 MiB.'); }
@@ -186,6 +193,7 @@ export class WorkspaceTools implements vscode.Disposable {
   }
 
   private async save(doc: vscode.TextDocument): Promise<void> {
+    await this.resolve({ path: doc.uri.toString() });
     if (!await doc.save()) { throw new ToolError('SAVE_FAILED', 'Changes remain in the editor; saving failed.'); }
   }
 
@@ -229,7 +237,12 @@ export class WorkspaceTools implements vscode.Disposable {
       ...locationSchema, offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(500).default(100)
     }, true, async args => {
       const uri = await this.resolve(args);
-      const entries = (await vscode.workspace.fs.readDirectory(uri)).sort(([a], [b]) => a.localeCompare(b));
+      const entries: [string, vscode.FileType][] = [];
+      for (const entry of await vscode.workspace.fs.readDirectory(uri)) {
+        try { await this.resolve({ path: vscode.Uri.joinPath(uri, entry[0]).toString() }); entries.push(entry); }
+        catch (error) { if (!(error instanceof ToolError) || error.code !== 'PATH_DENIED') { throw error; } }
+      }
+      entries.sort(([a], [b]) => a.localeCompare(b));
       return { uri: uri.toString(), entries: entries.slice(args.offset, args.offset + args.limit).map(([name, type]) => ({ name, uri: vscode.Uri.joinPath(uri, name).toString(), type: type & vscode.FileType.SymbolicLink ? 'symlink' : type & vscode.FileType.Directory ? 'directory' : 'file' })), total: entries.length, nextOffset: args.offset + args.limit < entries.length ? args.offset + args.limit : null };
     });
 
@@ -346,7 +359,7 @@ export class WorkspaceTools implements vscode.Disposable {
       }));
     }
     register('proposal_get', 'Get a user review proposal status: pending, applying, accepted, rejected, or failed.', { proposalId: z.string().uuid() }, true, async args => this.reviews.status(args.proposalId));
-    registerAdvanced(register, { resolve: input => this.resolve(input), document: uri => this.document(uri), position: (doc, position) => this.position(doc, position), tasks: this.tasks });
+    registerAdvanced(register, { resolve: input => this.resolve(input), checkTree: uri => this.checkBlocked(uri, true), document: uri => this.document(uri), position: (doc, position) => this.position(doc, position), tasks: this.tasks });
     this.resources.register(register);
     this.refactors.register(register);
   }

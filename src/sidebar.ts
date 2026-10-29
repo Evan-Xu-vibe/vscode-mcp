@@ -72,6 +72,10 @@ export class McpSidebar implements vscode.TreeDataProvider<vscode.TreeItem>, vsc
     const allowedTasks = row('allowedTasks', '配置允许的任务', 'list-selection', 'vscode-mcp.configureTasks', names.length ? `已允许 ${names.length} 个` : '尚未允许任何任务');
     allowedTasks.tooltip = names.length ? `点击勾选允许的任务，或添加任务名称。\n${names.join('\n')}` : '点击选择允许的已有任务，或手动添加任务名称。';
     items.push(autoStart, permissions, approval, tasks, allowedTasks, row('log', '查看调用日志', 'output', 'vscode-mcp.showLog'));
+    const blockedPaths = configuration.get<string[]>('blockedPaths', []);
+    const blocked = row('blockedPaths', '禁止读写路径', 'shield', 'vscode-mcp.configureBlockedPaths', `${blockedPaths.length} 条规则`);
+    blocked.tooltip = `点击增删文件 / 目录路径，立即生效；目录包含全部子项。相对路径应用到各工作区根目录，不支持 glob。终端、任务和调试执行不受此限制。\n${blockedPaths.join('\n')}`;
+    items.push(blocked);
     const terminals = row('terminals', '允许终端读写', 'terminal', 'vscode-mcp.toggleTerminals', `${configuration.get<boolean>('terminals.enabled', false) ? '已开启' : '已关闭'}${!vscode.workspace.isTrusted ? ' · 工作区未受信任' : ''}`);
     terminals.tooltip = '点击切换，立即生效。允许读取命令输出和发送任意命令 / 输入；命令可访问工作区外。输出读取需要 VS Code 1.93+ 及 Shell Integration，不包含已有历史。';
     items.push(terminals);

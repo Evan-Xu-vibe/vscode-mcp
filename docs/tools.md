@@ -59,7 +59,7 @@
 | 错误码 | 客户端处理 |
 | --- | --- |
 | `ROOT_REQUIRED` | 从 workspace_info 获取并指定根 URI |
-| `PATH_DENIED` | 使用工作区内普通文件路径 |
+| `PATH_DENIED` | 使用工作区内且未被 `vscodeMcp.blockedPaths` 禁止的路径；整仓 Git 查询范围也不能包含禁止路径 |
 | `HASH_REQUIRED` | 先读取文件，再提供摘要 |
 | `VERSION_CONFLICT` | 重新读取并重新计算修改范围 |
 | `INVALID_RANGE` / `OVERLAPPING_EDITS` | 修正坐标或拆分重叠修改 |

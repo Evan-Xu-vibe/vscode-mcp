@@ -7,6 +7,7 @@ import { TaskRuns, taskId } from './tasks';
 
 export type RegisterTool = <S extends z.ZodRawShape>(name: string, description: string, schema: S, readOnly: boolean, handler: (args: z.infer<z.ZodObject<S>>) => Promise<Record<string, unknown>>) => void;
 interface AdvancedAccess {
+  checkTree(uri: vscode.Uri): Promise<void>;
   resolve(input: { path: string; root?: string }): Promise<vscode.Uri>;
   document(uri: vscode.Uri): Promise<vscode.TextDocument>;
   position(doc: vscode.TextDocument, position: { line: number; column: number }): vscode.Position;
@@ -38,15 +39,19 @@ export function registerAdvanced(register: RegisterTool, access: AdvancedAccess)
     return (await access.resolve({ path: top })).fsPath;
   };
   const output = (text: string) => ({ text: text.slice(0, 65536), truncated: text.length > 65536, source: 'git-on-disk', includesUnsavedChanges: false });
-  register('git_status', 'Read on-disk Git status. Repository root must be inside the workspace.', { root: z.string().optional() }, true, async args => output(await git(await repository(args.root), ['status', '--porcelain=v1', '--untracked-files=normal'])));
+  const checkedRepository = async (root?: string) => {
+    const cwd = await repository(root); await access.checkTree(vscode.Uri.file(cwd)); return cwd;
+  };
+  register('git_status', 'Read on-disk Git status. Repository root must be inside the workspace.', { root: z.string().optional() }, true, async args => output(await git(await checkedRepository(args.root), ['status', '--porcelain=v1', '--untracked-files=normal'])));
   register('git_diff', 'Read on-disk Git diff (no external diff drivers or textconv). Does not include dirty editor buffers.', { root: z.string().optional(), path: z.string().optional(), staged: z.boolean().default(false) }, true, async args => {
     const cwd = await repository(args.root);
     const target = args.path ? await access.resolve({ path: args.path, root: args.root }) : undefined;
+    await access.checkTree(target ?? vscode.Uri.file(cwd));
     const relative = target ? path.relative(cwd, target.fsPath) : undefined;
     if (relative && (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) { throw new ToolError('PATH_DENIED', 'File is outside this repository.'); }
     return output(await git(cwd, ['diff', '--no-ext-diff', '--no-textconv', ...(args.staged ? ['--cached'] : []), '--', ...(relative ? [relative] : [])]));
   });
-  register('git_log', 'Read recent Git commits without making changes.', { root: z.string().optional(), limit: z.number().int().min(1).max(100).default(20) }, true, async args => output(await git(await repository(args.root), ['log', `-n${args.limit}`, '--format=%H%x09%aI%x09%an%x09%s'])));
+  register('git_log', 'Read recent Git commits without making changes.', { root: z.string().optional(), limit: z.number().int().min(1).max(100).default(20) }, true, async args => output(await git(await checkedRepository(args.root), ['log', `-n${args.limit}`, '--format=%H%x09%aI%x09%an%x09%s'])));
 
   register('symbols_get', 'Get document symbols from installed language providers. Empty results may indicate no provider.', { ...location, limit }, true, async args => {
     const doc = await access.document(await access.resolve(args));

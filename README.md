@@ -103,6 +103,14 @@ Agent 可用 `files_preview` 将修改放入 **待确认修改** 面板。点击
 
 Git 查询需要系统安装 Git，不执行提交、推送等修改操作；差异基于磁盘，不包含未保存的编辑器内容。符号、定义和引用查询依赖已安装的语言服务，只返回工作区内的位置。
 
+## 禁止读写路径
+
+在服务控制侧边栏点击 **禁止读写路径**，添加具体文件或目录，例如 `.env`、`secrets` 或 `E:\private`。取消勾选可移除，全部取消可清空。对应设置为 `vscodeMcp.blockedPaths`，默认为空，修改后立即生效。
+
+相对路径应用到各工作区根目录，绝对路径仅指定该位置；目录规则包含全部子项，不支持 glob。文件读取、写入、保存、搜索、目录列表及资源操作会检查规则，符号链接 / junction 的实际目标也会检查。搜索请求的 `exclude` 不能覆盖禁止规则；接受已有修改提案时也会重新校验。目录移动会检查目标树中每个子项，包含受限文件的目录不能整体移动或删除。
+
+Git 整仓状态、日志和差异查询在仓库范围包含禁止路径时返回 `PATH_DENIED`；可以对不包含禁止路径的具体文件调用 `git_diff`。终端命令、任务、调试执行及语言服务生成的跨文件说明不属于文件沙箱，仍沿用各自的权限。
+
 ## 终端读写
 
 在服务控制侧边栏开启 **允许终端读写**（`vscodeMcp.terminals.enabled`，默认关闭），仅本机受信任工作区可用。Agent 可控制本窗口已有终端或创建新终端：先调用 `terminals_list` / `terminal_create` 获取 `terminalId`，再用 `terminal_write` 输入文字，或用 `terminal_execute` 执行命令并轮询 `terminal_read`。关闭终端用 `terminal_close`，会终止其中的进程。此权限独立于文件修改、修改确认和任务允许列表；终端命令按当前用户权限运行，可访问工作区外的文件及网络。
@@ -149,6 +157,7 @@ Windows 上可选择 PowerShell 7 或 Git Bash 作为默认终端；Windows Powe
 | `vscodeMcp.port` | `0` | 自动分配端口，可设置固定端口；修改后重启服务 |
 | `vscodeMcp.auth.enabled` | `true` | 是否要求 Bearer Key；可关闭验证，修改后重启服务 |
 | `vscodeMcp.allowWrites` | `true` | 是否允许创建、修改和保存文件，立即生效 |
+| `vscodeMcp.blockedPaths` | `[]` | 禁止读写的具体文件 / 目录路径，目录包含子项；侧边栏增删，立即生效，不支持 glob |
 | `vscodeMcp.requireApproval` | `false` | 修改与保存先进入待确认修改面板，立即生效 |
 | `vscodeMcp.tasks.enabled` | `false` | 是否允许执行任务，仅受信任工作区可用 |
 | `vscodeMcp.terminals.enabled` | `false` | 独立控制终端读写，默认关闭；读取输出需要 VS Code 1.93+ 和 Shell Integration |

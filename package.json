@@ -93,6 +93,11 @@
         "category": "VSCode MCP"
       },
       {
+        "command": "vscode-mcp.configureBlockedPaths",
+        "title": "配置禁止读写路径",
+        "category": "VSCode MCP"
+      },
+      {
         "command": "vscode-mcp.configureSearchExclude",
         "title": "配置搜索排除规则",
         "category": "VSCode MCP"
@@ -244,6 +249,13 @@
           "type": "boolean",
           "default": true,
           "description": "是否要求客户端提供 Bearer Key。修改后重启 MCP 服务。自定义 Key 通过侧边栏设置并存入 VS Code 密钥存储。"
+        },
+        "vscodeMcp.blockedPaths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "maxItems": 100,
+          "default": [],
+          "description": "禁止 MCP 文件接口读写的文件或目录路径，目录包含全部子项。支持绝对路径、相对于各工作区根目录的路径，不支持 glob。立即生效，搜索排除参数不能覆盖。终端、任务及调试执行不受此限制。"
         },
         "vscodeMcp.allowWrites": {
           "type": "boolean",

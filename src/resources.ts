@@ -96,6 +96,9 @@ export class FileResources {
     if (change.operation === 'move') {
       const target = change.target!;
       await this.absent(target);
+      for (const entry of snapshot.entries as { path: string }[]) {
+        await this.access.resolve({ path: path.join(target.fsPath, entry.path) });
+      }
       if (contains(change.uri.fsPath, target.fsPath)) { throw new ToolError('INVALID_DESTINATION', 'Destination cannot be inside the source.'); }
       const parent = await vscode.workspace.fs.stat(vscode.Uri.file(path.dirname(target.fsPath)));
       if (parent.type !== vscode.FileType.Directory) { throw new ToolError('NOT_A_DIRECTORY', 'Destination parent must exist.'); }

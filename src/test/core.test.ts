@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtemp, mkdir, rm, writeFile, symlink } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { assertWorkspacePath, contains, hash, SerialQueue } from '../core';
+import { assertWorkspacePath, assertPathNotBlocked, contains, hash, SerialQueue } from '../core';
 
 test('workspace boundary rejects traversal, sibling prefixes and escaping junctions', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'vscode-mcp-core-'));
@@ -18,6 +18,33 @@ test('workspace boundary rejects traversal, sibling prefixes and escaping juncti
     await symlink(outside, path.join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
     await assert.rejects(assertWorkspacePath([root], path.join(root, 'escape', 'secret.txt')), /outside the workspace/);
     await assert.rejects(assertWorkspacePath([root], path.join(root, 'escape', 'new.txt')), /outside the workspace/);
+  } finally {
+    assert.ok(path.resolve(temp).startsWith(path.resolve(os.tmpdir()) + path.sep));
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('blocked paths cover descendants, aliases, new files and tree queries without prefix collisions', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'vscode-mcp-blocked-'));
+  try {
+    const root = path.join(temp, 'workspace');
+    const other = path.join(temp, 'other');
+    await mkdir(path.join(root, 'secrets'), { recursive: true }); await mkdir(other);
+    await symlink(path.join(root, 'secrets'), path.join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir');
+    const denied = (target: string, rules = ['secrets'], tree = false) =>
+      assert.rejects(assertPathNotBlocked([root, other], target, rules, tree), { code: 'PATH_DENIED' });
+    await denied(path.join(root, 'secrets'));
+    await denied(path.join(root, 'secrets', 'missing', 'new.txt'));
+    await denied(path.join(root, 'alias', 'new.txt'));
+    await denied(path.join(root, 'secrets', 'new.txt'), ['alias']);
+    await denied(path.join(other, 'secrets', 'new.txt'));
+    await denied(root, ['secrets'], true);
+    await denied(path.join(root, 'secrets', 'new.txt'), [path.join(root, 'secrets')]);
+    await denied(path.join(root, 'a', '..', 'secrets', 'new.txt'));
+    if (process.platform === 'win32') { await denied(path.join(root, 'SECRETS', 'new.txt')); }
+    await assertPathNotBlocked([root], root, ['secrets']);
+    await assertPathNotBlocked([root], path.join(root, 'secrets-other', 'new.txt'), ['secrets']);
+    await assertPathNotBlocked([root], path.join(root, 'public.txt'), ['secrets'], true);
   } finally {
     assert.ok(path.resolve(temp).startsWith(path.resolve(os.tmpdir()) + path.sep));
     await rm(temp, { recursive: true, force: true });

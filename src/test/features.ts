@@ -22,6 +22,48 @@ export async function testFeatures(client: Client, root: vscode.WorkspaceFolder)
   const health = await vscode.commands.executeCommand<HealthReport>('vscode-mcp.checkConnection');
   assert.equal(health?.passed, true); assert.equal(health?.toolCount, 57);
 
+  // Deny rules are independent of search filters and rechecked when accepting reviews.
+  await mkdir(path.join(root.uri.fsPath, 'blocked-test', 'private'), { recursive: true });
+  await writeFile(path.join(root.uri.fsPath, 'blocked-test', 'private', 'secret.txt'), 'blockedneedle');
+  await writeFile(path.join(root.uri.fsPath, 'blocked-test', 'public.txt'), 'publicneedle');
+  const secret = await call('file_read', { path: 'blocked-test/private/secret.txt' });
+  const proposal = await call('files_preview', { files: [{ path: 'blocked-test/private/secret.txt', text: 'changed', expectedHash: secret.contentHash, save: true }] });
+  const source = await call('resource_info', { path: 'blocked-test' });
+  const queuedSearch = await call('files_search', { query: 'e', glob: 'blocked-test/private/secret.txt', exclude: [], limit: 1 });
+  assert.ok(queuedSearch.nextCursor);
+  try {
+    await vscode.commands.executeCommand('vscode-mcp.configureBlockedPaths', ['blocked-test/private']);
+    assert.deepEqual(vscode.workspace.getConfiguration('vscodeMcp').get('blockedPaths'), ['blocked-test/private']);
+    await call('file_read', { path: 'blocked-test/private/secret.txt' }, 'PATH_DENIED');
+    await call('file_read', { path: path.join(root.uri.fsPath, 'blocked-test/private/secret.txt') }, 'PATH_DENIED');
+    await call('file_read', { path: vscode.Uri.joinPath(root.uri, 'blocked-test/private/secret.txt').toString() }, 'PATH_DENIED');
+    await call('file_write', { path: 'blocked-test/private/new.txt', create: true, text: 'new' }, 'PATH_DENIED');
+    await call('file_save', { path: 'blocked-test/private/secret.txt', expectedHash: secret.contentHash }, 'PATH_DENIED');
+    await call('resource_info', { path: 'blocked-test' }, 'PATH_DENIED');
+    await call('resource_delete', { path: 'blocked-test', expectedFingerprint: source.fingerprint, recursive: true }, 'PATH_DENIED');
+    const listing = await call('files_list', { path: 'blocked-test' });
+    assert.deepEqual((listing.entries as { name: string }[]).map(entry => entry.name), ['public.txt']);
+    const search = await call('files_search', { query: 'blockedneedle', glob: 'blocked-test/**', exclude: [] });
+    assert.equal((search.matches as unknown[]).length, 0);
+    assert.equal(((await call('files_search', { cursor: queuedSearch.nextCursor })).matches as unknown[]).length, 0);
+    await vscode.commands.executeCommand('vscode-mcp.reviewAccept', proposal.proposalId);
+    const failed = await call('proposal_get', { proposalId: proposal.proposalId });
+    assert.equal(failed.status, 'failed');
+    assert.equal(((failed.result as Record<string, unknown>).error as { code: string }).code, 'PATH_DENIED');
+    assert.equal(await readFile(path.join(root.uri.fsPath, 'blocked-test/private/secret.txt'), 'utf8'), 'blockedneedle');
+    await call('file_read', { path: 'blocked-test/public.txt' });
+  } finally {
+    await vscode.commands.executeCommand('vscode-mcp.configureBlockedPaths', []);
+  }
+  await call('file_read', { path: 'blocked-test/private/secret.txt' });
+  const blockedMove = await call('resource_move', { path: 'blocked-test', target: 'blocked-target', expectedFingerprint: source.fingerprint, preview: true });
+  await vscode.commands.executeCommand('vscode-mcp.configureBlockedPaths', ['blocked-target/private']);
+  try {
+    await vscode.commands.executeCommand('vscode-mcp.reviewAccept', blockedMove.proposalId);
+    assert.equal((await call('proposal_get', { proposalId: blockedMove.proposalId })).status, 'failed');
+    assert.equal(await readFile(path.join(root.uri.fsPath, 'blocked-test/private/secret.txt'), 'utf8'), 'blockedneedle');
+  } finally { await vscode.commands.executeCommand('vscode-mcp.configureBlockedPaths', []); }
+
   // Resource operations share the approval queue and recheck the entire captured tree.
   const directory = await call('directory_create', { path: 'resource-test', preview: true });
   await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(vscode.Uri.joinPath(root.uri, 'resource-test'))));

@@ -155,6 +155,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       if (!/^\d+$/.test(input) || Number(input) < 100 || Number(input) > 50000) { throw new Error('请输入 100–50000 的整数。'); }
       await updateConfiguration('search.maxFiles', Number(input));
     }),
+    command('vscode-mcp.configureBlockedPaths', async value => {
+      let paths: unknown = value;
+      if (paths === undefined) {
+        const saved = vscode.workspace.getConfiguration('vscodeMcp').get<string[]>('blockedPaths', []);
+        const choices = saved.map(entry => ({ label: entry, path: entry, picked: true }));
+        const selected = await vscode.window.showQuickPick([...choices, { label: '$(add) 添加禁止读写路径…', path: '', picked: false }], {
+          canPickMany: true, title: '禁止读写路径', placeHolder: '取消勾选可移除；目录包含全部子项，立即生效'
+        });
+        if (selected === undefined) { return; }
+        const entries = selected.filter(item => item.path).map(item => item.path);
+        if (selected.some(item => !item.path)) {
+          const entry = await vscode.window.showInputBox({ title: '添加禁止读写路径', prompt: '文件或目录，例如 .env、secrets 或 E:\\private。不支持 glob；终端、任务和调试执行不受限制。',
+            validateInput: text => text.trim() && text.length <= 4096 && !/[\0\r\n*?]/.test(text) ? undefined : '请输入具体路径（最多 4096 字符），不能包含通配符或换行。' });
+          if (entry === undefined) { return; } entries.push(entry.trim());
+        }
+        paths = entries;
+      }
+      if (!Array.isArray(paths) || paths.length > 100 || paths.some(entry => typeof entry !== 'string' || !entry.trim() || entry.length > 4096 || /[\0\r\n*?]/.test(entry))) {
+        throw new Error('请提供最多 100 条具体文件或目录路径，不支持 glob，每条最多 4096 字符。');
+      }
+      await updateConfiguration('blockedPaths', [...new Set(paths.map(entry => entry.trim()))]);
+    }),
     command('vscode-mcp.configureSearchExclude', async value => {
       let patterns: unknown = value;
       if (patterns === undefined) {

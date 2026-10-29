@@ -22,6 +22,7 @@ export async function run(): Promise<void> {
     for (const command of ['vscode-mcp.toggleAuth', 'vscode-mcp.setKey', 'vscode-mcp.setPort', 'vscode-mcp.toggleAutoStart', 'vscode-mcp.toggleWrites', 'vscode-mcp.toggleApproval', 'vscode-mcp.toggleTasks', 'vscode-mcp.configureTasks']) {
       assert.ok(sidebarCommands.includes(command), `${command} is accessible from the sidebar`);
     }
+    assert.ok(sidebarCommands.includes('vscode-mcp.configureBlockedPaths'));
     assert.equal(sidebarCommands.includes('vscode-mcp.openSettings'), false);
   } finally { sidebar.dispose(); }
   await vscode.commands.executeCommand('vscode-mcp.toggleAutoStart');
@@ -237,6 +238,14 @@ export async function run(): Promise<void> {
     await writeFile(gitFixture, 'disk change\n');
     assert.match((await call('git_diff', { path: 'git-fixture.txt' })).text as string, /disk change/);
     await call('git_diff', { path: path.join(outside, 'secret.txt') }, 'PATH_DENIED');
+    await vscode.commands.executeCommand('vscode-mcp.configureBlockedPaths', ['git-fixture.txt']);
+    try {
+      await call('git_diff', { path: 'git-fixture.txt' }, 'PATH_DENIED');
+      await call('git_diff', {}, 'PATH_DENIED');
+      await call('git_status', {}, 'PATH_DENIED');
+      await call('git_log', {}, 'PATH_DENIED');
+      await call('git_diff', { path: 'fixture.txt' });
+    } finally { await vscode.commands.executeCommand('vscode-mcp.configureBlockedPaths', []); }
 
     const availableTasks = await call('tasks_list');
     const taskList = availableTasks.tasks as { id: string; name: string }[];

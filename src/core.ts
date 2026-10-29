@@ -51,6 +51,23 @@ export async function assertWorkspacePath(roots: string[], target: string): Prom
   }
 }
 
+// Paths are literal files/directories, not globs. Check both names and real targets
+// so a junction alias cannot bypass a denied directory (including new files).
+export async function assertPathNotBlocked(roots: string[], target: string, blocked: string[], includeDescendants = false): Promise<void> {
+  if (!blocked.length) { return; }
+  const targets = [path.resolve(target), await canonicalPath(target)];
+  for (const entry of blocked) {
+    if (typeof entry !== 'string' || !entry.trim()) { throw new ToolError('PATH_DENIED', 'Invalid blocked path configuration.'); }
+    const paths = path.isAbsolute(entry) ? [path.resolve(entry)] : roots.map(root => path.resolve(root, entry));
+    for (const denied of paths) {
+      const variants = [denied, await canonicalPath(denied)];
+      if (targets.some(value => variants.some(rule => contains(rule, value) || (includeDescendants && contains(value, rule))))) {
+        throw new ToolError('PATH_DENIED', 'Path is blocked by vscodeMcp.blockedPaths.');
+      }
+    }
+  }
+}
+
 export class SerialQueue {
   private tail: Promise<unknown> = Promise.resolve();
   run<T>(operation: () => Promise<T>): Promise<T> {
